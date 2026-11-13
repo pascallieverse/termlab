@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Termlab — mission control</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0;background:#0B0C0E}
+a{color:#7DB4FF}a:hover{color:#A8CCFF}
+button{font:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="font-family: Inter, system-ui, sans-serif; color: #E6E8EB; background: #0B0C0E; min-height: 900px; font-size: 14px; display: flex; flex-direction: column">
+
+<header style="min-height: 52px; box-sizing: border-box; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding: 8px 16px; border-bottom: 1px solid #23262C; background: #0F1113">
+<div style="display: flex; align-items: center; gap: 10px">
+<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#F5A524" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="5" cy="6" r="2"></circle><circle cx="5" cy="18" r="2"></circle><circle cx="19" cy="12" r="2"></circle><path d="M7 6h3c3 0 4 6 7 6M7 18h3c3 0 4-6 7-6"></path></svg>
+<span style="font-weight: 700; font-size: 15px">Termlab</span>
+</div>
+<nav aria-label="Views" style="display: flex; gap: 2px; padding: 3px; border-radius: 8px; background: #15181C; border: 1px solid #23262C">
+<a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; border-radius: 6px; color: #9AA1AC; text-decoration: none">Focus</a>
+<a href="#" aria-current="page" style="height: 30px; display: flex; align-items: center; padding: 0 12px; border-radius: 6px; background: #262A31; color: #E6E8EB; text-decoration: none">Mission control</a>
+</nav>
+<div style="flex: 1"></div>
+<div role="group" aria-label="Group by" style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #9AA1AC">
+Group by
+<button style="height: 30px; padding: 0 10px; border-radius: 999px; border: 1px solid #3A3F47; background: #262A31; color: #E6E8EB; font-size: 12px">Folder</button>
+<button style="height: 30px; padding: 0 10px; border-radius: 999px; border: 1px solid #23262C; background: transparent; color: #9AA1AC; font-size: 12px">Agent</button>
+<button style="height: 30px; padding: 0 10px; border-radius: 999px; border: 1px solid #23262C; background: transparent; color: #9AA1AC; font-size: 12px">Status</button>
+</div>
+<a href="NewSession.dc.html" style="display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px; border-radius: 8px; background: #F5A524; color: #1A1206; font-weight: 600; text-decoration: none">+ New session</a>
+</header>
+
+<section aria-label="Needs you" style="margin: 20px 24px 0; padding: 14px 16px; border-radius: 12px; border: 1px solid #6B4F17; background: #1A150C; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px">
+<span style="font-weight: 600; color: #F5C26B">▲ 2 sessions are waiting on you</span>
+<span style="font-size: 13px; color: #C9CED6"><b style="font-weight: 600">billing-api</b> · Claude Code wants to run a migration</span>
+<span style="font-size: 13px; color: #C9CED6"><b style="font-weight: 600">web-dashboard</b> · Gemini CLI exited with an error</span>
+<div style="flex: 1"></div>
+<button style="height: 36px; padding: 0 14px; border-radius: 8px; border: 1px solid #5A4318; background: transparent; color: #F5C26B">Review one by one</button>
+</section>
+
+<div style="padding: 8px 24px 32px; display: flex; flex-direction: column; gap: 8px">
+<sc-for list="{{folders}}" as="f" hint-placeholder-count="3">
+<section style="display: flex; flex-direction: column; gap: 12px; padding-top: 18px">
+<div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px">
+<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#C9CED6" stroke-width="2" aria-hidden="true" style="align-self: center"><path d="M3 6h6l2 2h10v11H3z"></path></svg>
+<h2 style="margin: 0; font-size: 16px; font-weight: 600">{{f.name}}</h2>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #8B929C">{{f.path}}</span>
+<span style="font-size: 12px; color: #9AA1AC">· {{f.summary}}</span>
+<div style="flex: 1"></div>
+<button style="height: 32px; padding: 0 12px; border-radius: 8px; border: 1px solid #2A2E35; background: #15181C; color: #C9CED6; font-size: 12px">+ Session here</button>
+</div>
+<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px">
+<sc-for list="{{f.tiles}}" as="t" hint-placeholder-count="3">
+<article style="{{t.cardStyle}}">
+<div style="display: flex; align-items: center; gap: 10px">
+<span style="{{t.monoStyle}}">{{t.mono}}</span>
+<div style="display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1">
+<h3 style="margin: 0; font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{t.title}}</h3>
+<span style="font-size: 12px; color: #9AA1AC">{{t.agentName}} · <span style="font-family: 'JetBrains Mono', monospace">⎇ {{t.branch}}</span></span>
+</div>
+<span style="{{t.pillStyle}}"><span style="{{t.dotStyle}}" aria-hidden="true"></span>{{t.statusLabel}}</span>
+</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.65; background: #08090A; border: 1px solid #1C1F24; border-radius: 8px; padding: 10px 12px; height: 104px; overflow: hidden">
+<sc-for list="{{t.tail}}" as="l" hint-placeholder-count="4">
+<div style="{{l.style}}">{{l.t}}</div>
+</sc-for>
+</div>
+<div style="display: flex; align-items: center; gap: 12px; font-size: 12px; color: #9AA1AC">
+<span>ctx {{t.ctx}}%</span><span>{{t.cost}}</span><span>{{t.time}}</span>
+<div style="flex: 1"></div>
+<sc-if value="{{t.needs}}" hint-placeholder-val="{{ false }}">
+<button style="height: 32px; padding: 0 12px; border-radius: 7px; border: 0; background: #F5A524; color: #1A1206; font-weight: 600; font-size: 12px">Allow</button>
+</sc-if>
+<a href="Main.dc.html" style="height: 32px; display: flex; align-items: center; padding: 0 12px; border-radius: 7px; border: 1px solid #2A2E35; background: #15181C; color: #E6E8EB; font-size: 12px; text-decoration: none">Open</a>
+</div>
+</article>
+</sc-for>
+</div>
+</section>
+</sc-for>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+const AGENTS = {
+  claude: { name: 'Claude Code', mono: 'CC', bg: '#3A2219', fg: '#F0A584' },
+  codex:  { name: 'Codex CLI',   mono: 'CX', bg: '#123026', fg: '#5FD3A8' },
+  vibe:   { name: 'Mistral Vibe', mono: 'MV', bg: '#3A2410', fg: '#FFA463' },
+  gemini: { name: 'Gemini CLI',  mono: 'GM', bg: '#172744', fg: '#8DB6FF' },
+  aider:  { name: 'Aider',       mono: 'AI', bg: '#2A2142', fg: '#C4B0FF' }
+};
+const STATUS = {
+  needs:   { label: 'Needs you', color: '#F5A524', text: '#F5C26B' },
+  running: { label: 'Running',   color: '#5B9BFF', text: '#C9CED6' },
+  idle:    { label: 'Idle',      color: '#8B929C', text: '#C9CED6' },
+  done:    { label: 'Done',      color: '#3FB950', text: '#C9CED6' },
+  error:   { label: 'Error',     color: '#F85149', text: '#FF8A80' }
+};
+const LINE = { muted: 'color:#9AA1AC', tool: 'color:#7DB4FF', ok: 'color:#56D364', err: 'color:#FF7B72', ask: 'color:#F5C26B;font-weight:600', add: 'color:#56D364' };
+const FOLDERS = [
+  { name: 'billing-api', path: '~/code/billing-api', tiles: [
+    { title: 'Move invoice retries to a queue worker', agent: 'claude', status: 'needs', branch: 'feat/retry-queue', ctx: 62, cost: '$2.37', time: '2m ago',
+      tail: [['tool', '● Write migrations/0042_retry_queue.sql'], ['muted', '● Bash npm test -- billing'], ['ok', '  ✓ 41 passed · 0 failed'], ['ask', '? Run the migration on your local database?']] },
+    { title: 'Idempotency keys for webhook handlers', agent: 'codex', status: 'running', branch: 'feat/webhook-idempotency', ctx: 38, cost: '$0.88', time: 'now',
+      tail: [['tool', '• Edited src/db/idempotency.ts (+58)'], ['tool', '• Edited src/webhooks/handler.ts (+31 −12)'], ['muted', '• Running npm test -- webhooks'], ['muted', '  ▍']] }
+  ] },
+  { name: 'web-dashboard', path: '~/clients/northwind/web-dashboard', tiles: [
+    { title: 'Upgrade to React 19', agent: 'gemini', status: 'error', branch: 'chore/react-19', ctx: 88, cost: '$1.94', time: '25m ago',
+      tail: [['tool', '✦ Shell npm install react@19 react-dom@19'], ['err', '  npm ERR! peer react@"^18" from react-beautiful-dnd'], ['muted', '✦ Trying --legacy-peer-deps…'], ['err', '✕ Process exited (code 1)']] },
+    { title: 'Dark mode for settings pages', agent: 'vibe', status: 'running', branch: 'ui/settings-dark', ctx: 54, cost: '$0.42', time: '1m ago',
+      tail: [['tool', '◆ write_file styles/tokens.css'], ['add', '+ [data-theme="dark"] { --surface: #121417 }'], ['tool', '◆ search_replace billing/page.tsx (9 edits)'], ['muted', '◆ Checking contrast on 14 components…']] },
+    { title: 'Fix flaky checkout e2e test', agent: 'claude', status: 'done', branch: 'fix/checkout-flake', ctx: 41, cost: '$0.31', time: '18m ago',
+      tail: [['err', '  ✗ 4 of 20 failed: waiting for "Order placed"'], ['tool', '● Edit e2e/checkout.spec.ts'], ['ok', '  ✓ 20 of 20 passed'], ['muted', 'Done. Waits on the network response now.']] }
+  ] },
+  { name: 'infra', path: '~/work/platform/infra', tiles: [
+    { title: 'Split prod and staging Terraform state', agent: 'codex', status: 'idle', branch: 'infra/split-state', ctx: 22, cost: '$0.29', time: '1h ago',
+      tail: [['muted', '• Explored terraform/ (31 files)'], ['tool', '• Proposal: 3 steps using terraform state mv'], ['muted', 'Waiting for your next message.'], ['muted', '']] },
+    { title: 'Runbook: database failover', agent: 'aider', status: 'done', branch: 'docs/failover', ctx: 17, cost: '$0.20', time: '2h ago',
+      tail: [['muted', '> /add docs/runbooks'], ['muted', '> Write a failover runbook for Postgres.'], ['tool', 'Applied edit to docs/runbooks/db-failover.md'], ['muted', 'Tokens: 29k sent, 3.1k received.']] }
+  ] }
+];
+
+class Component extends DCLogic {
+  renderVals() {
+    const folders = FOLDERS.map((f) => {
+      const tiles = f.tiles.map((t) => {
+        const a = AGENTS[t.agent];
+        const S = STATUS[t.status];
+        const hot = t.status === 'needs' || t.status === 'error';
+        return {
+          ...t,
+          agentName: a.name,
+          mono: a.mono,
+          monoStyle: 'flex:0 0 auto;width:32px;height:32px;border-radius:8px;display:grid;place-items:center;font-family:JetBrains Mono,monospace;font-size:11px;font-weight:600;background:' + a.bg + ';color:' + a.fg,
+          statusLabel: S.label,
+          dotStyle: 'display:inline-block;width:7px;height:7px;border-radius:50%;background:' + S.color,
+          pillStyle: 'flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 9px;border-radius:999px;font-size:12px;border:1px solid ' + S.color + '55;color:' + S.text,
+          cardStyle: 'display:flex;flex-direction:column;gap:12px;padding:14px;border-radius:12px;background:#111316;border:1px solid ' + (hot ? S.color + '88' : '#23262C'),
+          needs: t.status === 'needs',
+          tail: t.tail.map((l) => ({ t: l[1] || ' ', style: LINE[l[0]] }))
+        };
+      });
+      const n = (k) => tiles.filter((t) => t.status === k).length;
+      const parts = [];
+      if (n('running')) parts.push(n('running') + ' running');
+      if (n('needs') + n('error')) parts.push((n('needs') + n('error')) + ' need attention');
+      if (n('done')) parts.push(n('done') + ' done');
+      if (n('idle')) parts.push(n('idle') + ' idle');
+      return { name: f.name, path: f.path, tiles, summary: parts.join(' · ') };
+    });
+    return { folders };
+  }
+}
+</script>
+</body>
+</html>

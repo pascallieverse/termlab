@@ -1,0 +1,21 @@
+[package]
+name = "termlabd"
+description = "Termlab's per-user background daemon: owns the agent ptys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+termlab-core = { path = "../termlab-core" }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "time", "net"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread"] }

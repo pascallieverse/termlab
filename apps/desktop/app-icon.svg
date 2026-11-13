@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Termlab app icon: a lab flask whose contents are a terminal prompt. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#272C37"/>
+      <stop offset="1" stop-color="#111318"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F8B23A"/>
+      <stop offset="1" stop-color="#F09A1A"/>
+    </linearGradient>
+  </defs>
+  <!-- macOS icon grid: 824px body centred on a 1024px canvas -->
+  <rect x="103" y="103" width="818" height="818" rx="182" fill="url(#bg)" stroke="#3A404D" stroke-width="6"/>
+  <g transform="translate(0 14)">
+    <!-- bubbles rising out of the flask -->
+    <circle cx="556" cy="312" r="46" fill="#2F7DF6" stroke="#111318" stroke-width="16"/>
+    <circle cx="628" cy="226" r="30" fill="#9B4FE0" stroke="#111318" stroke-width="14"/>
+    <!-- flask -->
+    <path d="M462 414V496L300 748H724L562 496V414Z" fill="url(#amber)" stroke="url(#amber)" stroke-width="40" stroke-linejoin="round"/>
+    <path d="M430 410H594" stroke="#F8B23A" stroke-width="52" stroke-linecap="round"/>
+    <!-- prompt -->
+    <path d="M430 612l60 50-60 50" fill="none" stroke="#111318" stroke-width="46" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M538 712h74" stroke="#111318" stroke-width="46" stroke-linecap="round"/>
+  </g>
+</svg>

@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Termlab — new session</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0;background:#0B0C0E}
+a{color:#7DB4FF}a:hover{color:#A8CCFF}
+button,input,textarea,select{font:inherit}
+button{cursor:pointer}
+</style>
+</helmet>
+<div style="width: 720px; height: 800px; box-sizing: border-box; font-family: Inter, system-ui, sans-serif; font-size: 14px; color: #E6E8EB; background: #111316; border: 1px solid #2A2E35; border-radius: 14px; display: flex; flex-direction: column; overflow: hidden">
+
+<div style="display: flex; align-items: center; gap: 12px; padding: 18px 22px; border-bottom: 1px solid #23262C">
+<h1 style="margin: 0; font-size: 18px; font-weight: 600">New session</h1>
+<div role="tablist" aria-label="Mode" style="display: flex; gap: 2px; padding: 3px; border-radius: 8px; background: #0B0C0E; border: 1px solid #23262C; margin-left: 8px">
+<button role="tab" aria-selected="{{startSel}}" onClick="{{toStart}}" style="{{startTab}}">Start new</button>
+<button role="tab" aria-selected="{{resumeSel}}" onClick="{{toResume}}" style="{{resumeTab}}">Resume or attach</button>
+</div>
+<div style="flex: 1"></div>
+<a href="Main.dc.html" aria-label="Close" style="width: 36px; height: 36px; display: grid; place-items: center; border-radius: 8px; color: #9AA1AC">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg>
+</a>
+</div>
+
+<sc-if value="{{isStart}}" hint-placeholder-val="{{ true }}">
+<div style="flex: 1; overflow: auto; padding: 18px 22px; display: flex; flex-direction: column; gap: 20px">
+
+<fieldset style="border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px">
+<legend style="padding: 0; margin-bottom: 8px; font-size: 12px; font-weight: 600; color: #9AA1AC">Agent</legend>
+<div style="display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px">
+<sc-for list="{{agents}}" as="a" hint-placeholder-count="5">
+<button onClick="{{a.pick}}" aria-pressed="{{a.pressed}}" style="{{a.cardStyle}}">
+<span style="{{a.monoStyle}}">{{a.mono}}</span>
+<span style="font-size: 13px; font-weight: 600; color: #E6E8EB">{{a.name}}</span>
+<span style="font-size: 11px; color: #9AA1AC; font-family: 'JetBrains Mono', monospace">{{a.cmd}}</span>
+</button>
+</sc-for>
+</div>
+</fieldset>
+
+<div style="display: flex; flex-direction: column; gap: 8px">
+<span style="font-size: 12px; font-weight: 600; color: #9AA1AC">Project folder</span>
+<div role="radiogroup" aria-label="Project folder" style="display: flex; flex-direction: column; gap: 6px">
+<sc-for list="{{folders}}" as="f" hint-placeholder-count="3">
+<button role="radio" aria-checked="{{f.checked}}" onClick="{{f.pick}}" style="{{f.rowStyle}}">
+<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#C9CED6" stroke-width="2" aria-hidden="true"><path d="M3 6h6l2 2h10v11H3z"></path></svg>
+<span style="font-weight: 500">{{f.name}}</span>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #8B929C; flex: 1; text-align: left">{{f.path}}</span>
+<span style="font-size: 12px; color: #9AA1AC">{{f.branch}}</span>
+</button>
+</sc-for>
+<button style="display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px; border-radius: 8px; border: 1px dashed #343941; background: transparent; color: #C9CED6">
+<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h6l2 2h10v11H3zM12 11v5M9.5 13.5h5"></path></svg>
+Choose another folder…
+</button>
+</div>
+</div>
+
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px">
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="ns-model" style="font-size: 12px; font-weight: 600; color: #9AA1AC">Model</label>
+<select id="ns-model" style="height: 40px; padding: 0 10px; border-radius: 8px; background: #0B0C0E; border: 1px solid #2A2E35; color: #E6E8EB">
+<sc-for list="{{models}}" as="m" hint-placeholder-count="2"><option>{{m}}</option></sc-for>
+</select>
+</div>
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="ns-iso" style="font-size: 12px; font-weight: 600; color: #9AA1AC">Run in</label>
+<select id="ns-iso" style="height: 40px; padding: 0 10px; border-radius: 8px; background: #0B0C0E; border: 1px solid #2A2E35; color: #E6E8EB">
+<option>Current checkout</option>
+<option>New git worktree</option>
+<option>Dev container</option>
+</select>
+</div>
+</div>
+
+<fieldset style="border: 0; margin: 0; padding: 0">
+<legend style="padding: 0; margin-bottom: 8px; font-size: 12px; font-weight: 600; color: #9AA1AC">Permissions</legend>
+<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px">
+<sc-for list="{{perms}}" as="p" hint-placeholder-count="3">
+<button onClick="{{p.pick}}" aria-pressed="{{p.pressed}}" style="{{p.style}}">
+<span style="font-weight: 600; font-size: 13px; color: #E6E8EB">{{p.label}}</span>
+<span style="font-size: 12px; color: #9AA1AC">{{p.desc}}</span>
+</button>
+</sc-for>
+</div>
+</fieldset>
+
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="ns-prompt" style="font-size: 12px; font-weight: 600; color: #9AA1AC">First message (optional)</label>
+<textarea id="ns-prompt" rows="3" placeholder="What should {{agentName}} work on?" style="resize: none; padding: 10px 12px; border-radius: 8px; background: #0B0C0E; border: 1px solid #2A2E35; color: #E6E8EB; line-height: 1.5; outline: none"></textarea>
+</div>
+
+<div style="padding: 10px 12px; border-radius: 8px; background: #08090A; border: 1px solid #1C1F24; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #9AA1AC; overflow-wrap: anywhere">
+<span style="color: #8B929C">Will run:</span> <span style="color: #E6E8EB">cd {{folderPath}} &amp;&amp; {{command}}</span>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{isResume}}" hint-placeholder-val="{{ false }}">
+<div style="flex: 1; overflow: auto; padding: 18px 22px; display: flex; flex-direction: column; gap: 14px">
+<p style="margin: 0; color: #9AA1AC; font-size: 13px; line-height: 1.5">Sessions found on this Mac. Resume a past conversation in its folder, or attach to one already running in another terminal.</p>
+<sc-for list="{{found}}" as="r" hint-placeholder-count="4">
+<div style="display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 10px; border: 1px solid #23262C; background: #0F1113">
+<span style="{{r.monoStyle}}">{{r.mono}}</span>
+<div style="display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1">
+<span style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.title}}</span>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #8B929C">{{r.path}} · {{r.when}}</span>
+</div>
+<span style="{{r.tagStyle}}">{{r.tag}}</span>
+<button style="height: 34px; padding: 0 12px; border-radius: 8px; border: 1px solid #2A2E35; background: #15181C; color: #E6E8EB; font-size: 13px">{{r.action}}</button>
+</div>
+</sc-for>
+</div>
+</sc-if>
+
+<div style="display: flex; align-items: center; gap: 10px; padding: 14px 22px; border-top: 1px solid #23262C">
+<label style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: #C9CED6"><input type="checkbox" checked style="accent-color: #F5A524"> Notify me when it needs input</label>
+<div style="flex: 1"></div>
+<a href="Main.dc.html" style="height: 40px; display: flex; align-items: center; padding: 0 16px; border-radius: 8px; border: 1px solid #2A2E35; color: #C9CED6; text-decoration: none">Cancel</a>
+<a href="Main.dc.html" style="height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 16px; border-radius: 8px; background: #F5A524; color: #1A1206; font-weight: 600; text-decoration: none">Start session <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; opacity: 0.75">⌘↵</span></a>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":720,"height":800}}'>
+const AG = [
+  { key: 'claude', name: 'Claude Code', mono: 'CC', bg: '#3A2219', fg: '#F0A584', bin: 'claude', models: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'],
+    perm: { ask: '', edit: ' --permission-mode acceptEdits', auto: ' --permission-mode bypassPermissions' }, modelFlag: '--model' },
+  { key: 'codex', name: 'Codex', mono: 'CX', bg: '#123026', fg: '#5FD3A8', bin: 'codex', models: ['gpt-5-codex', 'gpt-5'],
+    perm: { ask: ' --ask-for-approval on-request', edit: ' --full-auto', auto: ' --dangerously-bypass-approvals-and-sandbox' }, modelFlag: '-m' },
+  { key: 'vibe', name: 'Vibe', mono: 'MV', bg: '#3A2410', fg: '#FFA463', bin: 'vibe', models: ['devstral-2', 'devstral-small-2'],
+    perm: { ask: '', edit: '', auto: ' --auto-approve' }, modelFlag: '' },
+  { key: 'gemini', name: 'Gemini', mono: 'GM', bg: '#172744', fg: '#8DB6FF', bin: 'gemini', models: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+    perm: { ask: '', edit: ' --approval-mode auto_edit', auto: ' --yolo' }, modelFlag: '-m' },
+  { key: 'aider', name: 'Aider', mono: 'AI', bg: '#2A2142', fg: '#C4B0FF', bin: 'aider', models: ['sonnet', 'gpt-5'],
+    perm: { ask: '', edit: '', auto: ' --yes-always' }, modelFlag: '--model' }
+];
+const FOLDERS = [
+  { name: 'billing-api', path: '~/code/billing-api', branch: 'main' },
+  { name: 'web-dashboard', path: '~/clients/northwind/web-dashboard', branch: 'develop' },
+  { name: 'infra', path: '~/work/platform/infra', branch: 'main' }
+];
+const PERMS = [
+  { key: 'ask', label: 'Ask first', desc: 'Approve every edit and command' },
+  { key: 'edit', label: 'Auto-edit', desc: 'Edits OK, ask before commands' },
+  { key: 'auto', label: 'Full auto', desc: 'No prompts. Use in a sandbox' }
+];
+const FOUND = [
+  { a: 0, title: 'Move invoice retries to a queue worker', path: '~/code/billing-api', when: 'running in iTerm · pid 48211', tag: 'Live', action: 'Attach' },
+  { a: 0, title: 'Add rate limiting to public API', path: '~/code/billing-api', when: 'yesterday 17:40', tag: 'Past', action: 'Resume' },
+  { a: 1, title: 'Terraform state split proposal', path: '~/work/platform/infra', when: 'today 08:50', tag: 'Past', action: 'Resume' },
+  { a: 2, title: 'Settings page dark mode', path: '~/clients/northwind/web-dashboard', when: 'running in tmux · sb:3', tag: 'Live', action: 'Attach' }
+];
+
+class Component extends DCLogic {
+  renderVals() {
+    const st = this.state || {};
+    const mode = st.mode || 'start';
+    const ai = st.agent ?? 0;
+    const fi = st.folder ?? 0;
+    const pk = st.perm || 'ask';
+    const A = AG[ai];
+    const mono = (x, s) => 'flex:0 0 auto;width:' + s + 'px;height:' + s + 'px;border-radius:8px;display:grid;place-items:center;font-family:JetBrains Mono,monospace;font-size:11px;font-weight:600;background:' + x.bg + ';color:' + x.fg;
+    const tab = (on) => 'height:30px;padding:0 12px;border-radius:6px;border:0;background:' + (on ? '#262A31' : 'transparent') + ';color:' + (on ? '#E6E8EB' : '#9AA1AC');
+
+    const agents = AG.map((x, i) => ({
+      name: x.name, mono: x.mono, cmd: x.bin,
+      monoStyle: mono(x, 32),
+      pressed: i === ai ? 'true' : 'false',
+      cardStyle: 'display:flex;flex-direction:column;align-items:flex-start;gap:6px;padding:12px;border-radius:10px;text-align:left;background:' + (i === ai ? '#1C1F24' : '#0B0C0E') + ';border:1px solid ' + (i === ai ? '#F5A524' : '#23262C'),
+      pick: () => this.setState({ agent: i })
+    }));
+    const folders = FOLDERS.map((f, i) => ({
+      ...f,
+      checked: i === fi ? 'true' : 'false',
+      rowStyle: 'display:flex;align-items:center;gap:10px;height:42px;padding:0 12px;border-radius:8px;color:#E6E8EB;background:' + (i === fi ? '#1C1F24' : '#0B0C0E') + ';border:1px solid ' + (i === fi ? '#F5A524' : '#23262C'),
+      pick: () => this.setState({ folder: i })
+    }));
+    const perms = PERMS.map((p) => ({
+      ...p,
+      pressed: p.key === pk ? 'true' : 'false',
+      style: 'display:flex;flex-direction:column;align-items:flex-start;gap:4px;padding:10px 12px;border-radius:8px;text-align:left;background:' + (p.key === pk ? '#1C1F24' : '#0B0C0E') + ';border:1px solid ' + (p.key === pk ? '#F5A524' : '#23262C'),
+      pick: () => this.setState({ perm: p.key })
+    }));
+    const found = FOUND.map((r) => {
+      const x = AG[r.a];
+      const live = r.tag === 'Live';
+      return { ...r, mono: x.mono, monoStyle: mono(x, 32),
+        tagStyle: 'font-size:12px;padding:3px 8px;border-radius:999px;border:1px solid ' + (live ? '#5B9BFF66' : '#3A3F47') + ';color:' + (live ? '#A8CCFF' : '#9AA1AC') };
+    });
+    const command = A.bin + (A.modelFlag ? ' ' + A.modelFlag + ' ' + A.models[0] : '') + A.perm[pk];
+
+    return {
+      isStart: mode === 'start', isResume: mode === 'resume',
+      startSel: mode === 'start' ? 'true' : 'false', resumeSel: mode === 'resume' ? 'true' : 'false',
+      startTab: tab(mode === 'start'), resumeTab: tab(mode === 'resume'),
+      toStart: () => this.setState({ mode: 'start' }), toResume: () => this.setState({ mode: 'resume' }),
+      agents, folders, perms, found, models: A.models, agentName: A.name,
+      folderPath: FOLDERS[fi].path, command
+    };
+  }
+}
+</script>
+</body>
+</html>

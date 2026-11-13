@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Termlab — command palette</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0;background:#0B0C0E}
+a{color:#7DB4FF}a:hover{color:#A8CCFF}
+button,input{font:inherit}
+</style>
+</helmet>
+<div style="width: 640px; height: 480px; box-sizing: border-box; font-family: Inter, system-ui, sans-serif; font-size: 14px; color: #E6E8EB; background: #111316; border: 1px solid #2A2E35; border-radius: 14px; display: flex; flex-direction: column; overflow: hidden">
+<div style="display: flex; align-items: center; gap: 10px; padding: 0 16px; height: 56px; border-bottom: 1px solid #23262C">
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#9AA1AC" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+<label for="pal-q" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0)">Search sessions and commands</label>
+<input id="pal-q" value="billing" style="flex: 1; height: 40px; background: transparent; border: 0; outline: none; color: #E6E8EB; font-size: 16px">
+<kbd style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #9AA1AC; border: 1px solid #2A2E35; border-radius: 4px; padding: 2px 6px">esc</kbd>
+</div>
+<div role="listbox" aria-label="Results" style="flex: 1; overflow: auto; padding: 8px">
+<div style="padding: 8px 10px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8B929C">Sessions in ~/code/billing-api</div>
+<div role="option" aria-selected="true" style="display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 8px; background: #1C1F24">
+<span style="width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; background: #3A2219; color: #F0A584">CC</span>
+<span style="flex: 1">Move invoice retries to a queue worker</span>
+<span style="font-size: 12px; color: #F5C26B">▲ Needs you</span>
+<kbd style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #9AA1AC">↵</kbd>
+</div>
+<div role="option" aria-selected="false" style="display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 8px">
+<span style="width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; background: #123026; color: #5FD3A8">CX</span>
+<span style="flex: 1">Idempotency keys for webhook handlers</span>
+<span style="font-size: 12px; color: #9AA1AC">● Running</span>
+</div>
+<div style="padding: 12px 10px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8B929C">Actions</div>
+<div role="option" aria-selected="false" style="display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 8px">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#C9CED6" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>
+<span style="flex: 1">Hand off “invoice retries” to Codex with full context</span>
+<kbd style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #9AA1AC">⌘⇧H</kbd>
+</div>
+<div role="option" aria-selected="false" style="display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 8px">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#C9CED6" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+<span style="flex: 1">New Claude Code session in ~/code/billing-api</span>
+<kbd style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #9AA1AC">⌘N</kbd>
+</div>
+<div role="option" aria-selected="false" style="display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 8px">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#C9CED6" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 12h16M4 6h16M4 18h10"></path></svg>
+<span style="flex: 1">Broadcast a message to all billing-api sessions</span>
+</div>
+<div role="option" aria-selected="false" style="display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 8px">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FF8A80" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
+<span style="flex: 1">Stop idle sessions in billing-api</span>
+</div>
+</div>
+<div style="display: flex; gap: 16px; padding: 10px 16px; border-top: 1px solid #23262C; font-size: 12px; color: #9AA1AC">
+<span>↑↓ move</span><span>↵ open</span><span>⌘↵ open in split</span><span style="margin-left: auto">Type &gt; for commands, @ for folders</span>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":640,"height":480}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

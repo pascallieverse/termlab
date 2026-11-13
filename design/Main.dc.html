@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Termlab — session workspace</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0;background:#0B0C0E}
+a{color:#7DB4FF}a:hover{color:#A8CCFF}
+button,input,textarea,select{font:inherit}
+button{cursor:pointer}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.sb-row:not(.is-sel):hover{background:#181B20 !important}
+.ghost:hover{background:#1E2127 !important}
+</style>
+</helmet>
+<div style="font-family: Inter, system-ui, sans-serif; color: #E6E8EB; background: #0B0C0E; min-height: 900px; display: flex; flex-direction: column; font-size: 14px">
+
+<header style="min-height: 52px; box-sizing: border-box; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding: 8px 16px; border-bottom: 1px solid #23262C; background: #0F1113">
+<div style="display: flex; align-items: center; gap: 10px">
+<svg width="22" height="22" viewBox="0 0 24 24" fill="#F5A524" stroke="#F5A524" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><mask id="logo-prompt" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24"><rect width="24" height="24" fill="#fff" stroke="none"></rect><path d="M8.9 17l2.3 1.9-2.3 1.9M13 20.8h2.8" fill="none" stroke="#000" stroke-width="1.8"></path></mask><circle cx="13.7" cy="5.4" r="1.8" stroke="none"></circle><circle cx="16.5" cy="2.1" r="1.1" stroke="none"></circle><g mask="url(#logo-prompt)"><path d="M10.1 9.4v3.1L3.9 22.2h16.2l-6.2-9.7V9.4z" stroke-width="1.5"></path><path d="M8.9 9.2h6.2" stroke-width="2"></path></g></svg>
+<span style="font-weight: 700; font-size: 15px; letter-spacing: -0.01em">Termlab</span>
+</div>
+<div style="display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; color: #9AA1AC">
+<span style="padding: 4px 10px; border-radius: 999px; background: #15181C; border: 1px solid #23262C"><span style="color: #7DB4FF">●</span> {{counts.running}} running</span>
+<span style="padding: 4px 10px; border-radius: 999px; background: #2A2112; border: 1px solid #5A4318; color: #F5C26B">▲ {{counts.needs}} need you</span>
+<span style="padding: 4px 10px; border-radius: 999px; background: #15181C; border: 1px solid #23262C">$6.41 today · 3 agents</span>
+</div>
+<div style="flex: 1"></div>
+<button class="ghost" style="display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; border-radius: 8px; background: #15181C; border: 1px solid #2A2E35; color: #C9CED6">
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+Search or run a command <kbd style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #9AA1AC; border: 1px solid #2A2E35; border-radius: 4px; padding: 1px 5px">⌘K</kbd>
+</button>
+<a href="NewSession.dc.html" style="display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px; border-radius: 8px; background: #F5A524; color: #1A1206; font-weight: 600; text-decoration: none">
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+New session
+</a>
+</header>
+
+<div style="flex: 1; display: flex; flex-wrap: wrap; min-height: 0">
+
+<nav aria-label="Sessions" style="flex: 1 1 280px; max-width: 100%; box-sizing: border-box; border-right: 1px solid #23262C; background: #0F1113; padding: 14px 10px; display: flex; flex-direction: column; gap: 12px">
+<div style="padding: 0 6px">
+<label for="sb-search" class="sr">Filter sessions</label>
+<input id="sb-search" placeholder="Filter sessions" style="width: 100%; box-sizing: border-box; height: 36px; padding: 0 12px; border-radius: 8px; background: #15181C; border: 1px solid #2A2E35; color: #E6E8EB; outline: none">
+</div>
+<div role="group" aria-label="Show" style="display: flex; gap: 6px; padding: 0 6px; flex-wrap: wrap">
+<sc-for list="{{filters}}" as="f" hint-placeholder-count="3">
+<button onClick="{{f.pick}}" aria-pressed="{{f.pressed}}" style="{{f.style}}">{{f.label}}</button>
+</sc-for>
+</div>
+<sc-for list="{{groups}}" as="g" hint-placeholder-count="3">
+<div style="display: flex; flex-direction: column; gap: 2px">
+<div style="display: flex; align-items: flex-start; gap: 8px; padding: 10px 8px 6px; color: #8B929C">
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#C9CED6" stroke-width="2" aria-hidden="true" style="margin-top: 1px; flex: 0 0 auto"><path d="M3 6h6l2 2h10v11H3z"></path></svg>
+<span style="display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1">
+<span style="font-size: 13px; font-weight: 600; color: #E6E8EB">{{g.name}}</span>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8B929C; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{g.path}}</span>
+</span>
+<span style="font-size: 12px">{{g.count}}</span>
+</div>
+<sc-for list="{{g.sessions}}" as="s" hint-placeholder-count="2">
+<button class="{{s.cls}}" onClick="{{s.pick}}" aria-current="{{s.current}}" style="{{s.rowStyle}}">
+<span style="{{s.monoStyle}}">{{s.mono}}</span>
+<span style="display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1">
+<span style="font-weight: 500; color: #E6E8EB; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{s.title}}</span>
+<span style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: #9AA1AC">
+<span style="{{s.dotStyle}}" aria-hidden="true"></span>
+<span style="{{s.statusTextStyle}}">{{s.statusLabel}}</span>
+<span aria-hidden="true">·</span>
+<span>{{s.time}}</span>
+</span>
+</span>
+</button>
+</sc-for>
+</div>
+</sc-for>
+<button class="ghost" style="display: flex; align-items: center; gap: 8px; height: 36px; margin: 2px 6px 0; padding: 0 10px; border-radius: 8px; border: 1px dashed #343941; background: transparent; color: #C9CED6; font-size: 13px">
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h6l2 2h10v11H3zM12 11v5M9.5 13.5h5"></path></svg>
+Add project folder…
+</button>
+<div style="margin-top: auto; padding: 10px 8px 2px; border-top: 1px solid #23262C; display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: #9AA1AC">
+<span style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8B929C">Detected agents</span>
+<span style="display: flex; justify-content: space-between"><span>Claude Code</span><span style="font-family: 'JetBrains Mono', monospace">2.4.1</span></span>
+<span style="display: flex; justify-content: space-between"><span>Codex CLI</span><span style="font-family: 'JetBrains Mono', monospace">0.58.0</span></span>
+<span style="display: flex; justify-content: space-between"><span>Mistral Vibe</span><span style="font-family: 'JetBrains Mono', monospace">1.3.0</span></span>
+<span style="display: flex; justify-content: space-between"><span>Gemini CLI</span><span style="font-family: 'JetBrains Mono', monospace">0.21.2</span></span>
+<span style="display: flex; justify-content: space-between"><span>Aider</span><span style="font-family: 'JetBrains Mono', monospace">0.86.1</span></span>
+</div>
+</nav>
+
+<main style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; background: #0B0C0E">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 14px 20px; border-bottom: 1px solid #23262C">
+<span style="{{sel.monoStyleLg}}">{{sel.mono}}</span>
+<div style="display: flex; flex-direction: column; gap: 4px; min-width: 0">
+<h1 style="margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -0.01em">{{sel.title}}</h1>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: #9AA1AC">
+<span>{{sel.agentName}}</span><span aria-hidden="true">·</span>
+<span style="font-family: 'JetBrains Mono', monospace">{{sel.model}}</span><span aria-hidden="true">·</span>
+<span style="font-family: 'JetBrains Mono', monospace">⎇ {{sel.branch}}</span>
+</div>
+</div>
+<span style="{{sel.pillStyle}}"><span style="{{sel.dotStyle}}" aria-hidden="true"></span>{{sel.statusLabel}}</span>
+<div style="flex: 1"></div>
+<div role="tablist" aria-label="Session view" style="display: flex; gap: 2px; padding: 3px; border-radius: 8px; background: #15181C; border: 1px solid #23262C">
+<button role="tab" aria-selected="true" style="height: 30px; padding: 0 12px; border-radius: 6px; border: 0; background: #262A31; color: #E6E8EB">Terminal</button>
+<button role="tab" aria-selected="false" style="height: 30px; padding: 0 12px; border-radius: 6px; border: 0; background: transparent; color: #9AA1AC">Diff</button>
+<button role="tab" aria-selected="false" style="height: 30px; padding: 0 12px; border-radius: 6px; border: 0; background: transparent; color: #9AA1AC">Timeline</button>
+</div>
+</div>
+
+<div style="flex: 1; min-height: 480px; padding: 20px 24px; overflow: auto; font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.7; background: #08090A">
+<div style="color: #8B929C; margin-bottom: 12px">{{sel.dir}} — attached via pty · started {{sel.started}}</div>
+<sc-for list="{{sel.lines}}" as="line" hint-placeholder-count="8">
+<div style="{{line.style}}">{{line.t}}</div>
+</sc-for>
+<sc-if value="{{sel.running}}" hint-placeholder-val="{{ false }}">
+<div style="color: #7DB4FF; margin-top: 6px">▍ working…</div>
+</sc-if>
+</div>
+
+<sc-if value="{{sel.needsInput}}" hint-placeholder-val="{{ true }}">
+<div style="margin: 0 20px; margin-top: -1px; padding: 14px 16px; border: 1px solid #6B4F17; border-radius: 10px; background: #1E180D; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px">
+<div style="display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 280px">
+<span style="font-weight: 600; color: #F5C26B">{{sel.agentName}} is asking for permission</span>
+<code style="font-family: 'JetBrains Mono', monospace; font-size: 12.5px; color: #E6E8EB">{{sel.askCmd}}</code>
+</div>
+<div style="display: flex; gap: 8px; flex-wrap: wrap">
+<button onClick="{{allow}}" style="height: 36px; padding: 0 14px; border-radius: 8px; border: 0; background: #F5A524; color: #1A1206; font-weight: 600">Allow once</button>
+<button onClick="{{allow}}" class="ghost" style="height: 36px; padding: 0 14px; border-radius: 8px; border: 1px solid #5A4318; background: transparent; color: #F5C26B">Always allow in session</button>
+<button onClick="{{deny}}" class="ghost" style="height: 36px; padding: 0 14px; border-radius: 8px; border: 1px solid #3A3F47; background: transparent; color: #C9CED6">Deny</button>
+</div>
+</div>
+</sc-if>
+
+<form style="padding: 14px 20px 18px; display: flex; flex-direction: column; gap: 8px">
+<label for="composer" class="sr">Message to this session</label>
+<div style="display: flex; gap: 10px; align-items: flex-end; padding: 10px 10px 10px 14px; border-radius: 10px; background: #121417; border: 1px solid #2A2E35">
+<textarea id="composer" rows="2" placeholder="Reply to {{sel.agentName}}…  (keys go straight to the pty)" style="flex: 1; resize: none; background: transparent; border: 0; outline: none; color: #E6E8EB; font-size: 14px; line-height: 1.5"></textarea>
+<button type="button" style="height: 36px; padding: 0 14px; border-radius: 8px; border: 0; background: #E6E8EB; color: #0B0C0E; font-weight: 600">Send ↵</button>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12px; color: #9AA1AC">
+<label style="display: flex; align-items: center; gap: 6px"><input type="checkbox" style="accent-color: #F5A524"> Broadcast to all sessions in {{sel.project}}</label>
+<span>Esc interrupts · ⌘⇧H hand off to another agent · ⌘D split pane</span>
+</div>
+</form>
+</main>
+
+<aside aria-label="Session details" style="flex: 1 1 300px; max-width: 100%; box-sizing: border-box; border-left: 1px solid #23262C; background: #0F1113; padding: 18px; display: flex; flex-direction: column; gap: 22px">
+<section style="display: flex; flex-direction: column; gap: 10px">
+<h2 style="margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8B929C">Session</h2>
+<dl style="margin: 0; display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 8px 10px; font-size: 13px">
+<dt style="color: #9AA1AC">Agent</dt><dd style="margin: 0">{{sel.agentName}}</dd>
+<dt style="color: #9AA1AC">Model</dt><dd style="margin: 0; font-family: 'JetBrains Mono', monospace; font-size: 12px">{{sel.model}}</dd>
+<dt style="color: #9AA1AC">Directory</dt><dd style="margin: 0; font-family: 'JetBrains Mono', monospace; font-size: 12px; overflow-wrap: anywhere">{{sel.dir}}</dd>
+<dt style="color: #9AA1AC">Branch</dt><dd style="margin: 0; font-family: 'JetBrains Mono', monospace; font-size: 12px">{{sel.branch}}</dd>
+<dt style="color: #9AA1AC">Isolation</dt><dd style="margin: 0">{{sel.isolation}}</dd>
+<dt style="color: #9AA1AC">Permissions</dt><dd style="margin: 0">{{sel.perm}}</dd>
+<dt style="color: #9AA1AC">Resume ID</dt><dd style="margin: 0; font-family: 'JetBrains Mono', monospace; font-size: 12px">{{sel.resume}}</dd>
+</dl>
+</section>
+
+<section style="display: flex; flex-direction: column; gap: 10px">
+<h2 style="margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8B929C">Context &amp; spend</h2>
+<div style="display: flex; justify-content: space-between; font-size: 13px"><span style="color: #9AA1AC">Context window</span><span>{{sel.ctx}}%</span></div>
+<div role="img" aria-label="Context window {{sel.ctx}} percent used" style="height: 6px; border-radius: 3px; background: #23262C; overflow: hidden"><div style="{{sel.ctxBar}}"></div></div>
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px">
+<div style="padding: 10px; border-radius: 8px; background: #15181C; border: 1px solid #23262C"><div style="font-size: 12px; color: #9AA1AC">Tokens</div><div style="font-size: 16px; font-weight: 600; margin-top: 2px">{{sel.tokens}}</div></div>
+<div style="padding: 10px; border-radius: 8px; background: #15181C; border: 1px solid #23262C"><div style="font-size: 12px; color: #9AA1AC">Cost</div><div style="font-size: 16px; font-weight: 600; margin-top: 2px">{{sel.cost}}</div></div>
+</div>
+</section>
+
+<section style="display: flex; flex-direction: column; gap: 8px">
+<h2 style="margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8B929C">Changed files</h2>
+<sc-for list="{{sel.files}}" as="file" hint-placeholder-count="3">
+<div style="display: flex; align-items: center; gap: 8px; font-family: 'JetBrains Mono', monospace; font-size: 12px">
+<span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #C9CED6">{{file.path}}</span>
+<span style="color: #56D364">+{{file.add}}</span><span style="color: #FF7B72">−{{file.del}}</span>
+</div>
+</sc-for>
+<sc-if value="{{sel.noFiles}}" hint-placeholder-val="{{ false }}">
+<span style="font-size: 13px; color: #9AA1AC">No changes yet.</span>
+</sc-if>
+</section>
+
+<section style="display: flex; flex-direction: column; gap: 8px; margin-top: auto">
+<h2 style="margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8B929C">Actions</h2>
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px">
+<button class="ghost" style="height: 40px; border-radius: 8px; background: #15181C; border: 1px solid #2A2E35; color: #E6E8EB">Open in terminal</button>
+<button class="ghost" style="height: 40px; border-radius: 8px; background: #15181C; border: 1px solid #2A2E35; color: #E6E8EB">Fork session</button>
+<button class="ghost" style="height: 40px; border-radius: 8px; background: #15181C; border: 1px solid #2A2E35; color: #E6E8EB">Hand off to…</button>
+<button class="ghost" style="height: 40px; border-radius: 8px; background: #15181C; border: 1px solid #2A2E35; color: #E6E8EB">Review diff</button>
+</div>
+<button class="ghost" style="height: 40px; border-radius: 8px; background: transparent; border: 1px solid #5C2A27; color: #FF8A80">Stop session</button>
+</section>
+</aside>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+const AGENTS = {
+  claude: { name: 'Claude Code', mono: 'CC', bg: '#3A2219', fg: '#F0A584' },
+  codex:  { name: 'Codex CLI',   mono: 'CX', bg: '#123026', fg: '#5FD3A8' },
+  vibe:   { name: 'Mistral Vibe', mono: 'MV', bg: '#3A2410', fg: '#FFA463' },
+  gemini: { name: 'Gemini CLI',  mono: 'GM', bg: '#172744', fg: '#8DB6FF' },
+  aider:  { name: 'Aider',       mono: 'AI', bg: '#2A2142', fg: '#C4B0FF' }
+};
+const STATUS = {
+  needs:   { label: 'Needs you', color: '#F5A524', text: '#F5C26B' },
+  running: { label: 'Running',   color: '#5B9BFF', text: '#9AA1AC' },
+  idle:    { label: 'Idle',      color: '#8B929C', text: '#9AA1AC' },
+  done:    { label: 'Done',      color: '#3FB950', text: '#9AA1AC' },
+  error:   { label: 'Error',     color: '#F85149', text: '#FF8A80' }
+};
+const LINE = {
+  user:  'color:#E6E8EB;font-weight:600;margin-top:10px',
+  muted: 'color:#9AA1AC',
+  tool:  'color:#7DB4FF',
+  add:   'color:#56D364;background:rgba(63,185,80,.10);padding:0 8px;margin-left:16px',
+  del:   'color:#FF7B72;background:rgba(248,81,73,.10);padding:0 8px;margin-left:16px',
+  ok:    'color:#56D364',
+  ask:   'color:#F5C26B;font-weight:600;margin-top:8px',
+  err:   'color:#FF7B72'
+};
+const SESSIONS = [
+  { id: 's1', project: 'billing-api', title: 'Move invoice retries to a queue worker', agent: 'claude', model: 'claude-opus-5-5', status: 'needs', time: '2m', branch: 'feat/retry-queue', dir: '~/code/billing-api', isolation: 'Git worktree', perm: 'Ask before commands', resume: 'a41f…9c2', started: '10:12', ctx: 62, tokens: '184k', cost: '$2.37',
+    askCmd: '$ psql -d billing_dev -f migrations/0042_retry_queue.sql',
+    files: [{ path: 'src/billing/retry.ts', add: 48, del: 71 }, { path: 'src/workers/invoice-retry.worker.ts', add: 112, del: 0 }, { path: 'migrations/0042_retry_queue.sql', add: 24, del: 0 }, { path: 'test/billing/retry.test.ts', add: 66, del: 9 }],
+    lines: [
+      { k: 'user', t: '› Move invoice retries off setTimeout into a queue-backed worker. Keep backoff the same and add tests.' },
+      { k: 'muted', t: '● Read src/billing/retry.ts (214 lines)' },
+      { k: 'muted', t: '● Search "retryInvoice" — 6 matches in 4 files' },
+      { k: 'tool', t: '● Edit src/billing/retry.ts' },
+      { k: 'del', t: '- setTimeout(() => retryInvoice(id), backoff(attempt))' },
+      { k: 'add', t: '+ await retryQueue.add("invoice", { id, attempt }, { delay: backoff(attempt) })' },
+      { k: 'tool', t: '● Write src/workers/invoice-retry.worker.ts (112 lines)' },
+      { k: 'tool', t: '● Write migrations/0042_retry_queue.sql' },
+      { k: 'muted', t: '● Bash npm test -- billing' },
+      { k: 'ok', t: '  ✓ 41 passed · 0 failed (3.8s)' },
+      { k: 'ask', t: '? The worker needs the retry_queue table. Run the migration on your local database?' }
+    ] },
+  { id: 's2', project: 'billing-api', title: 'Idempotency keys for webhook handlers', agent: 'codex', model: 'gpt-5-codex', status: 'running', time: 'now', branch: 'feat/webhook-idempotency', dir: '~/code/billing-api', isolation: 'Git worktree', perm: 'Auto-edit, ask for commands', resume: '019a…e71', started: '10:31', ctx: 38, tokens: '96k', cost: '$0.88',
+    files: [{ path: 'src/webhooks/handler.ts', add: 31, del: 12 }, { path: 'src/db/idempotency.ts', add: 58, del: 0 }],
+    lines: [
+      { k: 'user', t: '› Make every webhook handler idempotent using the event id. Store processed ids for 72h.' },
+      { k: 'muted', t: '• Explored src/webhooks (9 files)' },
+      { k: 'tool', t: '• Plan: add idempotency table → wrap handlers → add replay test' },
+      { k: 'tool', t: '• Edited src/db/idempotency.ts (+58)' },
+      { k: 'tool', t: '• Edited src/webhooks/handler.ts (+31 −12)' },
+      { k: 'muted', t: '• Running npm test -- webhooks' }
+    ] },
+  { id: 's3', project: 'web-dashboard', title: 'Dark mode for settings pages', agent: 'vibe', model: 'devstral-2', status: 'running', time: '1m', branch: 'ui/settings-dark', dir: '~/clients/northwind/web-dashboard', isolation: 'Current checkout', perm: 'Auto-approve edits', resume: 'v-7d20', started: '10:05', ctx: 54, tokens: '121k', cost: '$0.42',
+    files: [{ path: 'app/settings/layout.tsx', add: 14, del: 6 }, { path: 'styles/tokens.css', add: 40, del: 2 }, { path: 'app/settings/billing/page.tsx', add: 9, del: 9 }],
+    lines: [
+      { k: 'user', t: '› Add dark mode to /settings using our existing tokens. No hard-coded colors.' },
+      { k: 'muted', t: '◆ grep -r "#fff" app/settings — 23 hits' },
+      { k: 'tool', t: '◆ write_file styles/tokens.css' },
+      { k: 'add', t: '+ [data-theme="dark"] { --surface: #121417; --text: #E6E8EB; }' },
+      { k: 'tool', t: '◆ search_replace app/settings/billing/page.tsx (9 edits)' },
+      { k: 'muted', t: '◆ Checking contrast on 14 components…' }
+    ] },
+  { id: 's4', project: 'web-dashboard', title: 'Fix flaky checkout e2e test', agent: 'claude', model: 'claude-sonnet-5-5', status: 'done', time: '18m', branch: 'fix/checkout-flake', dir: '~/clients/northwind/web-dashboard', isolation: 'Git worktree', perm: 'Ask before commands', resume: 'c7e0…41b', started: '09:40', ctx: 41, tokens: '77k', cost: '$0.31',
+    files: [{ path: 'e2e/checkout.spec.ts', add: 7, del: 11 }],
+    lines: [
+      { k: 'user', t: '› checkout.spec.ts fails about 1 in 5 runs on CI. Find out why and fix it.' },
+      { k: 'muted', t: '● Bash npx playwright test checkout --repeat-each=20' },
+      { k: 'err', t: '  ✗ 4 of 20 failed: waiting for "Order placed" timed out' },
+      { k: 'tool', t: '● Edit e2e/checkout.spec.ts — wait for the payment request instead of a fixed 500ms sleep' },
+      { k: 'ok', t: '  ✓ 20 of 20 passed' },
+      { k: 'muted', t: 'Done. The test raced the payment request; it now waits on the network response.' }
+    ] },
+  { id: 's5', project: 'web-dashboard', title: 'Upgrade to React 19', agent: 'gemini', model: 'gemini-2.5-pro', status: 'error', time: '25m', branch: 'chore/react-19', dir: '~/clients/northwind/web-dashboard', isolation: 'Container', perm: 'Auto-approve edits', resume: 'g-55aa', started: '09:22', ctx: 88, tokens: '402k', cost: '$1.94',
+    files: [{ path: 'package.json', add: 4, del: 4 }, { path: 'package-lock.json', add: 912, del: 840 }],
+    lines: [
+      { k: 'user', t: '› Upgrade react and react-dom to 19 and fix whatever breaks.' },
+      { k: 'tool', t: '✦ Shell npm install react@19 react-dom@19' },
+      { k: 'err', t: '  npm ERR! peer react@"^18" from react-beautiful-dnd@13.1.1' },
+      { k: 'muted', t: '✦ Trying --legacy-peer-deps…' },
+      { k: 'err', t: '✕ Process exited (code 1) · context window 88% full' }
+    ] },
+  { id: 's6', project: 'infra', title: 'Split prod and staging Terraform state', agent: 'codex', model: 'gpt-5-codex', status: 'idle', time: '1h', branch: 'infra/split-state', dir: '~/work/platform/infra', isolation: 'Current checkout', perm: 'Read only', resume: '0199…b03', started: '08:50', ctx: 22, tokens: '41k', cost: '$0.29',
+    files: [],
+    lines: [
+      { k: 'user', t: '› Propose how to split our single Terraform state into prod and staging. Don’t change anything yet.' },
+      { k: 'muted', t: '• Explored terraform/ (31 files)' },
+      { k: 'tool', t: '• Proposal written to the chat: 3 steps, uses terraform state mv' },
+      { k: 'muted', t: 'Waiting for your next message.' }
+    ] },
+  { id: 's7', project: 'infra', title: 'Runbook: database failover', agent: 'aider', model: 'claude-sonnet-5-5', status: 'done', time: '2h', branch: 'docs/failover', dir: '~/work/platform/infra', isolation: 'Current checkout', perm: 'Auto-commit off', resume: '—', started: '08:02', ctx: 17, tokens: '29k', cost: '$0.20',
+    files: [{ path: 'docs/runbooks/db-failover.md', add: 134, del: 0 }],
+    lines: [
+      { k: 'user', t: '> /add docs/runbooks' },
+      { k: 'user', t: '> Write a failover runbook for the primary Postgres cluster.' },
+      { k: 'tool', t: 'Applied edit to docs/runbooks/db-failover.md' },
+      { k: 'muted', t: 'Tokens: 29k sent, 3.1k received.' }
+    ] }
+];
+const PROJECTS = [{ name: 'billing-api', path: '~/code/billing-api' }, { name: 'web-dashboard', path: '~/clients/northwind/web-dashboard' }, { name: 'infra', path: '~/work/platform/infra' }];
+
+class Component extends DCLogic {
+  renderVals() {
+    const st = this.state || {};
+    const selId = st.sel || 's1';
+    const over = st.over || {};
+    const extra = st.extra || {};
+    const filter = st.filter || 'all';
+    const all = SESSIONS.map((s) => ({ ...s, status: over[s.id] || s.status }));
+
+    const enrich = (s) => {
+      const a = AGENTS[s.agent];
+      const S = STATUS[s.status];
+      const isSel = s.id === selId;
+      return {
+        ...s,
+        agentName: a.name,
+        mono: a.mono,
+        monoStyle: 'flex:0 0 auto;width:28px;height:28px;border-radius:7px;display:grid;place-items:center;font-family:JetBrains Mono,monospace;font-size:11px;font-weight:600;background:' + a.bg + ';color:' + a.fg,
+        monoStyleLg: 'flex:0 0 auto;width:38px;height:38px;border-radius:9px;display:grid;place-items:center;font-family:JetBrains Mono,monospace;font-size:13px;font-weight:600;background:' + a.bg + ';color:' + a.fg,
+        statusLabel: S.label,
+        statusTextStyle: 'color:' + S.text,
+        dotStyle: 'display:inline-block;width:7px;height:7px;border-radius:50%;background:' + S.color,
+        pillStyle: 'display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:999px;font-size:12px;font-weight:500;border:1px solid ' + S.color + '55;color:' + (s.status === 'running' || s.status === 'idle' || s.status === 'done' ? '#C9CED6' : S.text),
+        cls: isSel ? 'sb-row is-sel' : 'sb-row',
+        current: isSel ? 'true' : 'false',
+        rowStyle: 'display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:8px;border-radius:8px;border:1px solid ' + (isSel ? '#2F343C' : 'transparent') + ';background:' + (isSel ? '#1C1F24' : 'transparent') + ';color:inherit',
+        pick: () => this.setState({ sel: s.id })
+      };
+    };
+
+    const match = (s) => filter === 'all' || (filter === 'attention' ? (s.status === 'needs' || s.status === 'error') : s.status === 'running');
+    const groups = PROJECTS.map((p) => {
+      const ss = all.filter((s) => s.project === p.name && match(s)).map(enrich);
+      return { name: p.name, path: p.path, count: ss.length, sessions: ss };
+    }).filter((g) => g.count > 0);
+
+    const counts = {
+      running: all.filter((s) => s.status === 'running').length,
+      needs: all.filter((s) => s.status === 'needs').length,
+      attention: all.filter((s) => s.status === 'needs' || s.status === 'error').length
+    };
+
+    const chip = (key, label) => {
+      const on = filter === key;
+      return {
+        label,
+        pressed: on ? 'true' : 'false',
+        style: 'height:30px;padding:0 10px;border-radius:999px;font-size:12px;border:1px solid ' + (on ? '#3A3F47' : '#23262C') + ';background:' + (on ? '#262A31' : 'transparent') + ';color:' + (on ? '#E6E8EB' : '#9AA1AC'),
+        pick: () => this.setState({ filter: key })
+      };
+    };
+    const filters = [chip('all', 'All ' + all.length), chip('attention', 'Needs attention ' + counts.attention), chip('running', 'Running ' + counts.running)];
+
+    const base = enrich(all.find((s) => s.id === selId) || all[0]);
+    const lines = base.lines.concat(extra[base.id] || []).map((l) => ({ t: l.t, style: LINE[l.k] || LINE.muted }));
+    const ctxColor = base.ctx > 80 ? '#F85149' : base.ctx > 60 ? '#F5A524' : '#5B9BFF';
+    const sel = {
+      ...base,
+      lines,
+      needsInput: base.status === 'needs',
+      running: base.status === 'running',
+      noFiles: base.files.length === 0,
+      ctxBar: 'height:100%;width:' + base.ctx + '%;background:' + ctxColor
+    };
+
+    const allow = () => this.setState({
+      over: { ...over, [base.id]: 'running' },
+      extra: { ...extra, [base.id]: [{ k: 'ok', t: '  ✓ Allowed once — running migration (from Termlab)' }] }
+    });
+    const deny = () => this.setState({
+      over: { ...over, [base.id]: 'idle' },
+      extra: { ...extra, [base.id]: [{ k: 'err', t: '  ✗ Denied — the agent will look for another way' }] }
+    });
+
+    return { groups, filters, counts, sel, allow, deny };
+  }
+}
+</script>
+</body>
+</html>
