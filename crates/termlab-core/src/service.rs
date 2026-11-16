@@ -39,6 +39,10 @@ const USAGE_INTERVAL_MS: Millis = 5_000;
 const ID_CHECK_INTERVAL_MS: Millis = 3_000;
 /// A finished sub-agent stays listed this long.
 const SUBAGENT_RECENT_MS: Millis = 10 * 60 * 1000;
+/// File times can lag the clock: Linux stamps them from a coarse clock, a few ms behind.
+/// A sub-agent is only taken as left over from an earlier process when its file is older
+/// than the process by more than this.
+const MTIME_SLACK_MS: Millis = 1_000;
 /// At most this many sub-agents are listed per session.
 const MAX_SUBAGENTS: usize = 12;
 /// Screen changes this soon after a keystroke are the agent echoing your typing.
@@ -1381,7 +1385,10 @@ impl Termlab {
             &self.config.env,
         );
         if let Some(started) = process_started {
-            for a in list.iter_mut().filter(|a| a.last_activity_at < started) {
+            for a in list
+                .iter_mut()
+                .filter(|a| a.last_activity_at < started - MTIME_SLACK_MS)
+            {
                 a.running = false;
             }
         }
