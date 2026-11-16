@@ -1,5 +1,7 @@
 # Rust build output
 /target
+# termlabd and termlab-hook as placed for packaging (scripts/sidecars.mjs)
+/apps/desktop/src-tauri/binaries
 
 # macOS
 .DS_Store

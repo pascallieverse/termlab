@@ -1,0 +1,12 @@
+{
+  "build": {
+    "beforeBuildCommand": "node scripts/sidecars.mjs && npm run build"
+  },
+  "bundle": {
+    "active": true,
+    "externalBin": ["binaries/termlabd", "binaries/termlab-hook"],
+    "macOS": {
+      "signingIdentity": "-"
+    }
+  }
+}

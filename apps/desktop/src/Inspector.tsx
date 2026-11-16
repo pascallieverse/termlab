@@ -128,7 +128,7 @@ export function Inspector({ session: s }: { session: Session }) {
             onClick={() =>
               void store.run(async () => {
                 const f = await api.fork(s.id);
-                store.select(f.id, { tab: "terminal" });
+                store.show(f);
               })
             }
           >

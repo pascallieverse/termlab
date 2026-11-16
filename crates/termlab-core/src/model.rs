@@ -198,6 +198,9 @@ pub struct SessionRecord {
     pub transcript_path: Option<String>,
     /// Send a native notification when this session needs input.
     pub notify: bool,
+    /// Hidden from active session lists until explicitly taken off hold.
+    #[serde(default)]
+    pub on_hold: bool,
     pub origin: SessionOrigin,
     /// The terminal size its output was last drawn at.
     pub term_size: Option<TermSize>,
@@ -335,6 +338,10 @@ pub struct SessionView {
     /// Sub-agents of a running session: those working now and those that just finished.
     #[serde(default)]
     pub subagents: Vec<SubAgent>,
+    /// A different version of the agent was installed after this session started;
+    /// restarting the session runs it.
+    #[serde(default)]
+    pub update_ready: bool,
 }
 
 /// Terminal size in character cells.

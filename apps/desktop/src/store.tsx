@@ -31,6 +31,8 @@ import {
   type Session,
 } from "./api";
 import { AGENTS, STATUS, homeFrom } from "./agents";
+import { matchesSessionFilter, type SessionFilter } from "./sessionFilters";
+import { getPrefs, usePrefs } from "./prefs";
 
 export type View = "focus" | "mission";
 export type Tab = "terminal" | "diff" | "timeline";
@@ -59,6 +61,10 @@ export interface Toast {
 interface Store {
   folders: Folder[];
   sessions: Session[];
+  visibleSessions: Session[];
+  sessionFilter: SessionFilter;
+  setSessionFilter(filter: SessionFilter): void;
+  setOnHold(id: string, onHold: boolean): Promise<void>;
   agents: AgentInfo[] | null;
   daemon: DaemonStatus;
   home: string | null;
@@ -82,6 +88,12 @@ interface Store {
   toasts: Toast[];
 
   select(id: string | null, opts?: { view?: View; tab?: Tab }): void;
+  /**
+   * Opens a session the app just created (started, resumed, forked, handed off). Its answer
+   * can arrive before the update that adds it to the list, so it's added here first:
+   * selecting a session the list doesn't know falls back to another one.
+   */
+  show(session: Session, opts?: { view?: View; tab?: Tab }): void;
   setSplit(id: string | null): void;
   setView(v: View): void;
   setTab(t: Tab): void;
@@ -125,6 +137,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [restarting, setRestarting] = useState(new Set<string>());
   const [terminalEpochs, setTerminalEpochs] = useState<Record<string, number>>({});
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [sessionFilter, setSessionFilter] = useState<SessionFilter>("all");
+  const visibleSessions = useMemo(
+    () => sessions.filter((s) => matchesSessionFilter(s, sessionFilter === "on_hold" ? "on_hold" : "all")),
+    [sessions, sessionFilter],
+  );
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [daemon, setDaemon] = useState<DaemonStatus>({ connected: false, message: null });
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -185,10 +202,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   // Notifications: Needs you (unless you're looking at it), and finishes while unfocused.
   const maybeNotify = useCallback(async (s: Session, prev: Session["status"] | undefined) => {
-    if (!s.notify || prev === s.status || prev === undefined) return;
+    if (s.onHold || !s.notify || prev === s.status || prev === undefined) return;
     const needs = s.status === "needs_you";
     const finished = (s.status === "done" || s.status === "error") && prev !== "done" && prev !== "error";
     if (!needs && !finished) return;
+    const prefs = getPrefs();
+    if (needs ? !prefs.notifyNeedsYou : !prefs.notifyFinished) return;
     if (finished && focused.current) return;
     if (needs && focused.current && document.visibilityState === "visible" && selectedRef.current === s.id) return;
     let ok = await isPermissionGranted();
@@ -210,6 +229,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const unlisten = [
       onCoreEvent((e) => {
         if (e.type === "sessionUpdated") {
+          if (e.session.onHold && notifiedFocus.current === e.session.id) notifiedFocus.current = null;
           const prev = prevStatus.current.get(e.session.id);
           prevStatus.current.set(e.session.id, e.session.status);
           setSessions((list) => sortSessions([e.session, ...list.filter((x) => x.id !== e.session.id)]));
@@ -229,6 +249,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         focused.current = payload;
         if (payload && notifiedFocus.current) {
           setSelectedId(notifiedFocus.current);
+          setSessionFilter("all");
           setView("focus");
           setTab("terminal");
           notifiedFocus.current = null;
@@ -246,21 +267,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [reload, maybeNotify]);
 
   // Dock badge: sessions waiting on you.
-  const needCount = sessions.filter((s) => s.status === "needs_you").length;
+  const { dockBadge } = usePrefs();
+  const needCount = sessions.filter((s) => !s.onHold && s.status === "needs_you").length;
   useEffect(() => {
     void getCurrentWindow()
-      .setBadgeCount(needCount > 0 ? needCount : undefined)
+      .setBadgeCount(dockBadge && needCount > 0 ? needCount : undefined)
       .catch(() => {});
-  }, [needCount]);
+  }, [needCount, dockBadge]);
 
   // Keep a valid selection.
   useEffect(() => {
-    if (selectedId && !sessions.some((s) => s.id === selectedId)) setSelectedId(null);
-    if (splitId && !sessions.some((s) => s.id === splitId)) setSplitId(null);
-    if (!selectedId && sessions.length > 0) {
-      setSelectedId((sessions.find((s) => s.live) ?? sessions[0]).id);
+    if (!visibleSessions.some((s) => s.id === selectedId)) {
+      setSelectedId((visibleSessions.find((s) => s.live) ?? visibleSessions[0])?.id ?? null);
     }
-  }, [sessions, selectedId, splitId]);
+    if (splitId && !visibleSessions.some((s) => s.id === splitId)) setSplitId(null);
+  }, [visibleSessions, selectedId, splitId]);
 
   const addFolder = useCallback(
     async (path: string) => {
@@ -276,6 +297,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const store: Store = {
     folders,
     sessions,
+    visibleSessions,
+    sessionFilter,
+    setSessionFilter,
+    async setOnHold(id, onHold) {
+      await run(async () => {
+        await api.setOnHold(id, onHold);
+        const updated = await api.session(id);
+        setSessions((list) => sortSessions(list.map((s) => s.id === id ? updated : s)));
+      });
+    },
     agents,
     daemon,
     home,
@@ -296,10 +327,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     inspectorOpen,
     toasts,
     select(id, opts) {
+      const session = sessions.find((s) => s.id === id);
+      if (session?.onHold) setSessionFilter("on_hold");
+      else if (session && sessionFilter === "on_hold") setSessionFilter("all");
       setSelectedId(id);
       if (id && id === splitId) setSplitId(null);
       if (opts?.view) setView(opts.view);
       if (opts?.tab) setTab(opts.tab);
+    },
+    show(session, opts) {
+      if (session.onHold) setSessionFilter("on_hold");
+      else if (sessionFilter === "on_hold") setSessionFilter("all");
+      // Only when it's missing: an update that already arrived is newer than this answer.
+      setSessions((list) => (list.some((x) => x.id === session.id) ? list : sortSessions([session, ...list])));
+      if (!prevStatus.current.has(session.id)) prevStatus.current.set(session.id, session.status);
+      setSelectedId(session.id);
+      if (session.id === splitId) setSplitId(null);
+      setView(opts?.view ?? "focus");
+      setTab(opts?.tab ?? "terminal");
     },
     setSplit(id) {
       setSplitId(id && id !== selectedId ? id : null);

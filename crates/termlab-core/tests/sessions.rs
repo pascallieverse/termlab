@@ -277,6 +277,7 @@ impl AgentAdapter for FakeAdapter {
             env: vec![("TERMLAB_SESSION_ID".into(), req.session_id.to_string())],
             cwd: req.cwd.clone(),
             agent_session_id: Some(format!("fake-{}", req.session_id)),
+            worker_pid: None,
         }
     }
     fn resume(&self, id: &str, req: &LaunchRequest) -> Option<CommandSpec> {
@@ -687,7 +688,7 @@ async fn heuristics_go_running_then_idle_then_needs_you_and_answer_with_keys() {
 /// Sends a recorded hook payload the way `termlab-hook` does.
 async fn send_hook(tl: &Termlab, session: SessionId, event: &str, payload: &str) {
     use tokio::io::AsyncWriteExt;
-    let mut s = tokio::net::UnixStream::connect(tl.dirs().hook_socket())
+    let mut s = termlab_core::transport::connect(&tl.dirs().hook_socket())
         .await
         .expect("hook socket");
     let msg = format!(
@@ -764,6 +765,8 @@ async fn recorded_claude_hook_payloads_drive_status() {
 /// A fake agent with history on disk and one background session running "elsewhere".
 struct HistoryAdapter {
     other_folder: PathBuf,
+    /// The background sessions the agent was asked to restart itself.
+    respawned: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl AgentAdapter for HistoryAdapter {
@@ -818,7 +821,20 @@ impl AgentAdapter for HistoryAdapter {
             kind: termlab_core::adapter::RunningKind::Background,
             status: Some(SessionStatus::Running),
             started_at: 1,
+            pid: None,
         }]
+    }
+    fn respawn(
+        &self,
+        r: &termlab_core::adapter::RunningSession,
+        _program: &Path,
+        _env: &UserEnv,
+    ) -> Option<Result<(), String>> {
+        self.respawned
+            .lock()
+            .unwrap()
+            .push(r.short_id.clone().unwrap_or_default());
+        Some(Ok(()))
     }
     fn attach(
         &self,
@@ -839,8 +855,10 @@ async fn loads_sessions_from_everywhere_imports_and_attaches() {
     let other = tempfile::tempdir().unwrap();
     let other_path = other.path().canonicalize().unwrap();
     let mut config = TermlabConfig::new(DataDirs::new(data.path()), test_env());
+    let respawned = Arc::new(std::sync::Mutex::new(Vec::new()));
     config.adapters = vec![Box::new(HistoryAdapter {
         other_folder: other_path.clone(),
+        respawned: respawned.clone(),
     })];
     let tl = Termlab::open(config).unwrap();
 
@@ -932,8 +950,117 @@ async fn loads_sessions_from_everywhere_imports_and_attaches() {
     let mut rx = att.events;
     let mut buf = String::new();
     wait_for(&mut rx, &mut buf, "ARGS: attach bg1").await;
+
+    // Restarting it onto a new version is the agent's job (it runs the session): Termlab
+    // asks it to, and only for sessions it is attached to.
+    tl.respawn(attached.record.id).unwrap();
+    assert_eq!(*respawned.lock().unwrap(), ["bg1"]);
+    let err = tl.respawn(imported.record.id).unwrap_err().to_string();
+    assert!(err.contains("can't restart this session itself"), "{err}");
+
     tl.stop(attached.record.id).unwrap();
     wait_for_exit_status(&tl, attached.record.id, SessionStatus::Done).await;
+}
+
+// ---- agent updates ----------------------------------------------------------------
+
+/// A fake agent installed the way agents that update themselves are: a link to the
+/// current version's file.
+#[cfg(unix)]
+struct LinkedAdapter {
+    program: PathBuf,
+}
+
+#[cfg(unix)]
+impl AgentAdapter for LinkedAdapter {
+    fn id(&self) -> AgentId {
+        AgentId::Claude
+    }
+    fn binary_name(&self) -> &'static str {
+        "sh"
+    }
+    fn api_key_vars(&self) -> &'static [&'static str] {
+        &[]
+    }
+    fn detect(&self, _env: &UserEnv) -> Option<Installed> {
+        Some(Installed {
+            path: self.program.clone(),
+            ..FakeAdapter.detect(_env)?
+        })
+    }
+    fn can_resume(&self) -> bool {
+        true
+    }
+    fn launch(&self, req: &LaunchRequest) -> CommandSpec {
+        FakeAdapter.launch(req)
+    }
+    fn resume(&self, id: &str, req: &LaunchRequest) -> Option<CommandSpec> {
+        FakeAdapter.resume(id, req)
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_updated_under_a_running_session_asks_for_a_restart() {
+    let data = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let program = bin.path().join("agent");
+    std::os::unix::fs::symlink("/bin/sh", &program).unwrap();
+
+    let mut config = TermlabConfig::new(DataDirs::new(data.path()), test_env());
+    config.adapters = vec![Box::new(LinkedAdapter {
+        program: program.clone(),
+    })];
+    config.update_check_ms = 50;
+    let tl = Termlab::open(config).unwrap();
+    tl.start_background().unwrap();
+
+    let folder = tl.add_folder(project.path()).unwrap();
+    let id = tl
+        .start_session(&start_req(folder.id, None), None)
+        .unwrap()
+        .record
+        .id;
+    wait_for_status(&tl, id, SessionStatus::Idle).await;
+    assert!(!tl.session(id).unwrap().update_ready, "nothing was updated");
+
+    // The agent updates itself: the link now points to a newer file.
+    std::fs::remove_file(&program).unwrap();
+    std::os::unix::fs::symlink("/bin/bash", &program).unwrap();
+    let mut events = tl.subscribe();
+    wait_until("the update to be noticed", || {
+        tl.session(id).unwrap().update_ready
+    })
+    .await;
+    // The app hears about it.
+    let told = timeout(WAIT, async {
+        loop {
+            if let Ok(CoreEvent::SessionUpdated { session }) = events.recv().await
+                && session.record.id == id
+                && session.update_ready
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    // (The notice may have gone out just before subscribing.)
+    let _ = told;
+
+    // Restarting runs the new version: nothing left to update.
+    tl.stop(id).unwrap();
+    wait_for_exit_status(&tl, id, SessionStatus::Done).await;
+    assert!(
+        !tl.session(id).unwrap().update_ready,
+        "an ended session has nothing to restart"
+    );
+    tl.restart(id, None).unwrap();
+    wait_for_status(&tl, id, SessionStatus::Idle).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(!tl.session(id).unwrap().update_ready);
+    tl.stop(id).unwrap();
+    wait_for_exit_status(&tl, id, SessionStatus::Done).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

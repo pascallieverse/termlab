@@ -94,7 +94,13 @@ type IconName =
   | "play"
   | "pause"
   | "prev"
-  | "next";
+  | "next"
+  | "sliders"
+  | "palette"
+  | "keyboard"
+  | "info"
+  | "bell"
+  | "bot";
 
 const ICONS: Record<IconName, ReactNode> = {
   folder: <path d="M3 6h6l2 2h10v11H3z" />,
@@ -156,6 +162,35 @@ const ICONS: Record<IconName, ReactNode> = {
   pause: <path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor" />,
   prev: <path d="M6 5v14M19 5.5v13L9 12z" fill="currentColor" />,
   next: <path d="M18 5v14M5 5.5v13L15 12z" fill="currentColor" />,
+  sliders: <path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1M15 4v4M9 10v4M17 16v4" />,
+  palette: (
+    <>
+      <path d="M12 3a9 9 0 1 0 0 18c1.1 0 1.8-.8 1.8-1.8 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-1 .8-1.8 1.8-1.8H17a4 4 0 0 0 4-4c0-4.4-4-8-9-8z" />
+      <circle cx="7.5" cy="11.5" r="1" fill="currentColor" />
+      <circle cx="10.5" cy="7.5" r="1" fill="currentColor" />
+      <circle cx="15" cy="8" r="1" fill="currentColor" />
+    </>
+  ),
+  keyboard: (
+    <>
+      <rect x="2.5" y="6" width="19" height="12" rx="2" />
+      <path d="M6.5 10h.01M10 10h.01M13.5 10h.01M17 10h.01M6.5 14h.01M17 14h.01M9.5 14h5" />
+    </>
+  ),
+  info: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 11v5M12 8h.01" />
+    </>
+  ),
+  bell: <path d="M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15zM10 20.5a2.2 2.2 0 0 0 4 0" />,
+  bot: (
+    <>
+      <rect x="4" y="8" width="16" height="11" rx="3" />
+      <path d="M12 4.5V8M9 13v1.5M15 13v1.5M2 13v2M22 13v2" />
+      <circle cx="12" cy="4" r="1" />
+    </>
+  ),
   panel: (
     <>
       <rect x="3" y="4" width="18" height="16" rx="2" />

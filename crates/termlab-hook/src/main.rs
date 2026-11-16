@@ -1,7 +1,8 @@
 //! `termlab-hook <agent> <event> [payload-json]`
 //!
 //! Run by agents' hooks (Claude Code hooks, Codex `notify`). Forwards the event to the
-//! Termlab daemon over the Unix socket named by `TERMLAB_HOOK_SOCKET`, tagged with
+//! Termlab daemon over the socket named by `TERMLAB_HOOK_SOCKET` (a Unix socket; on Windows
+//! a named pipe), tagged with
 //! `TERMLAB_SESSION_ID`. Both variables are set only on sessions Termlab started, so outside
 //! Termlab this does nothing.
 //!
@@ -15,7 +16,6 @@
 //! line).
 
 use std::io::{IsTerminal, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -52,11 +52,34 @@ fn forward(agent: &str, event: &str, payload: &[u8]) -> Option<()> {
         json_string(agent),
         json_string(event)
     );
-    let mut stream = UnixStream::connect(socket).ok()?;
-    stream.set_write_timeout(Some(SOCKET_TIMEOUT)).ok()?;
+    let mut stream = connect(&socket)?;
     stream.write_all(header.as_bytes()).ok()?;
     stream.write_all(payload).ok()?;
     stream.flush().ok()
+}
+
+#[cfg(unix)]
+fn connect(socket: &str) -> Option<impl Write> {
+    let stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
+    stream.set_write_timeout(Some(SOCKET_TIMEOUT)).ok()?;
+    Some(stream)
+}
+
+/// A named pipe opens like a file. "Busy" means the daemon is still taking the previous
+/// message; it is ready again within milliseconds.
+#[cfg(windows)]
+fn connect(socket: &str) -> Option<impl Write> {
+    const PIPE_BUSY: i32 = 231;
+    let start = std::time::Instant::now();
+    loop {
+        match std::fs::OpenOptions::new().write(true).open(socket) {
+            Ok(pipe) => return Some(pipe),
+            Err(e) if e.raw_os_error() == Some(PIPE_BUSY) && start.elapsed() < SOCKET_TIMEOUT => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 /// A one-line summary of the plan limits in Claude Code's status-line input

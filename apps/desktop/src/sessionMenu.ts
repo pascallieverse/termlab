@@ -4,6 +4,7 @@ import { api, type Folder, type Session } from "./api";
 import { AGENTS } from "./agents";
 import type { MenuItem } from "./ContextMenu";
 import type { useStore } from "./store";
+import { shortcutLabel } from "./shortcuts";
 
 type Store = ReturnType<typeof useStore>;
 
@@ -16,7 +17,7 @@ export function sessionMenu(store: Store, s: Session): MenuItem[] {
     { label: "Open", onSelect: () => store.select(s.id, { view: "focus", tab: "terminal" }) },
     {
       label: "Open in split",
-      shortcut: "⌘D",
+      shortcut: shortcutLabel("split") || undefined,
       disabled: !store.selectedId || store.selectedId === s.id,
       hint: store.selectedId === s.id ? "This is the session already open" : undefined,
       onSelect: () => {
@@ -25,6 +26,11 @@ export function sessionMenu(store: Store, s: Session): MenuItem[] {
       },
     },
     { label: "Rename…", onSelect: () => store.setRenameFor(s.id) },
+    {
+      label: s.onHold ? "Take off hold" : "Put on hold",
+      hint: s.onHold ? "Show in active session tabs again" : "Move to On hold; the process keeps running",
+      onSelect: () => void store.setOnHold(s.id, !s.onHold),
+    },
     "separator",
   ];
   if (!s.live) {
@@ -35,7 +41,7 @@ export function sessionMenu(store: Store, s: Session): MenuItem[] {
       onSelect: () =>
         void store.run(async () => {
           const r = await api.restart(s.id);
-          store.select(r.id, { view: "focus", tab: "terminal" });
+          store.show(r);
         }),
     });
   }
@@ -47,10 +53,10 @@ export function sessionMenu(store: Store, s: Session): MenuItem[] {
       onSelect: () =>
         void store.run(async () => {
           const f = await api.fork(s.id);
-          store.select(f.id, { view: "focus", tab: "terminal" });
+          store.show(f);
         }),
     },
-    { label: "Hand off to…", shortcut: "⌘⇧H", onSelect: () => store.setHandOffFor(s.id) },
+    { label: "Hand off to…", shortcut: shortcutLabel("handOff") || undefined, onSelect: () => store.setHandOffFor(s.id) },
     {
       label: "Open in terminal",
       disabled: s.live || !s.agentSessionId,
@@ -66,15 +72,15 @@ export function sessionMenu(store: Store, s: Session): MenuItem[] {
   );
   if (s.live) {
     const restarting = store.restarting.has(s.id);
-    const canRestart = !!s.agentSessionId && !!info?.canResume && s.origin !== "attached";
+    const canRestart = !!s.agentSessionId && !!info?.canResume;
     items.push({
-      label: restarting ? "Restarting…" : "Restart session",
+      label: restarting ? "Restarting…" : s.updateReady ? "Restart to update" : "Restart session",
       disabled: restarting || !canRestart,
-      hint: s.origin === "attached"
-        ? "Restart this agent in its original terminal"
-        : canRestart
-          ? "Stops the current process and resumes this conversation; interrupts any work in progress"
-          : "The conversation must be resumable before restarting",
+      hint: !canRestart
+        ? "The conversation must be resumable before restarting"
+        : s.origin === "attached"
+          ? `${name} restarts its background session on this conversation; interrupts any work in progress`
+          : "Stops the current process and resumes this conversation; interrupts any work in progress",
       onSelect: () => void store.restartSession(s.id),
     });
     items.push({ label: "Stop session", danger: true, disabled: store.restarting.has(s.id), onSelect: () => void store.run(() => api.stop(s.id)) });

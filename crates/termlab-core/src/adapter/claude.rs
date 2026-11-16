@@ -76,23 +76,40 @@ impl ClaudeAdapter {
 /// The settings JSON registering Termlab's hooks. Each hook runs
 /// `termlab-hook claude <Event>`, which forwards the payload to Termlab and exits.
 pub fn claude_settings_json(hook_binary: &Path, user_status_line: Option<&str>) -> Value {
-    let hook = shell_quote(&hook_binary.to_string_lossy());
+    settings_json(hook_binary, user_status_line, cfg!(windows))
+}
+
+fn settings_json(hook_binary: &Path, user_status_line: Option<&str>, windows: bool) -> Value {
+    let path = hook_binary.to_string_lossy();
+    let hook = shell_quote(&path);
     // The status line is how Claude Code hands out the plan's rate-limit usage. Without a
     // status line of the user's own, the hook prints a short usage summary as the line.
     // With one, the hook only listens and the user's command still draws the line.
     let status_command = match user_status_line {
-        Some(theirs) => format!(
+        // On Windows Claude Code runs a status line through Git Bash or, without it,
+        // PowerShell. Only a bare path with forward slashes means the same to both, and
+        // chaining to the user's own line needs a POSIX shell: otherwise theirs is kept.
+        _ if windows => {
+            let plain = path.replace('\\', "/");
+            let bare = plain
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_:./-".contains(c));
+            (user_status_line.is_none() && bare).then(|| format!("{plain} claude StatusLine"))
+        }
+        Some(theirs) => Some(format!(
             "input=$(cat); printf '%s' \"$input\" | {hook} claude StatusLineQuiet; printf '%s' \"$input\" | {{ {theirs}\n}}"
-        ),
-        None => format!("{hook} claude StatusLine"),
+        )),
+        None => Some(format!("{hook} claude StatusLine")),
     };
     let mut hooks = serde_json::Map::new();
     for (event, matcher) in HOOK_EVENTS {
-        let command = format!(
-            "{} claude {event}",
-            shell_quote(&hook_binary.to_string_lossy())
-        );
-        let handler = json!({ "type": "command", "command": command, "timeout": 5 });
+        let handler = if windows {
+            // Exec form: Claude Code starts the program itself with these arguments, so it
+            // doesn't matter which shell is installed.
+            json!({ "type": "command", "command": path, "args": ["claude", event], "timeout": 5 })
+        } else {
+            json!({ "type": "command", "command": format!("{hook} claude {event}"), "timeout": 5 })
+        };
         let group = if *matcher {
             json!({ "matcher": "*", "hooks": [handler] })
         } else {
@@ -100,10 +117,11 @@ pub fn claude_settings_json(hook_binary: &Path, user_status_line: Option<&str>) 
         };
         hooks.insert((*event).into(), json!([group]));
     }
-    json!({
-        "hooks": hooks,
-        "statusLine": { "type": "command", "command": status_command },
-    })
+    let mut settings = json!({ "hooks": hooks });
+    if let Some(command) = status_command {
+        settings["statusLine"] = json!({ "type": "command", "command": command });
+    }
+    settings
 }
 
 /// The plan limits in Claude Code's structured usage report (the answer to a `get_usage`
@@ -425,6 +443,10 @@ pub(crate) fn parse_agents_json(out: &str) -> Vec<RunningSession> {
                     _ => None,
                 },
                 started_at: x.get("startedAt").and_then(Value::as_i64).unwrap_or(0),
+                pid: x
+                    .get("pid")
+                    .and_then(Value::as_u64)
+                    .and_then(|p| u32::try_from(p).ok()),
             })
         })
         .collect()
@@ -808,17 +830,263 @@ impl AgentAdapter for ClaudeAdapter {
             .short_id
             .clone()
             .unwrap_or_else(|| running.agent_session_id.clone());
-        Some(CommandSpec::new(
+        let mut spec = CommandSpec::new(
             req,
             vec!["attach".into(), target],
             Some(running.agent_session_id.clone()),
-        ))
+        );
+        // The attach command is only a window onto the session; this process runs it.
+        spec.worker_pid = running.pid;
+        Some(spec)
+    }
+
+    /// `claude respawn <id>` restarts a background session "so it picks up the current
+    /// Claude binary" and prints `respawned <id>`. The conversation continues; clients
+    /// attached to it exit and can attach again.
+    fn respawn(
+        &self,
+        running: &RunningSession,
+        program: &Path,
+        env: &UserEnv,
+    ) -> Option<Result<(), String>> {
+        if running.kind != RunningKind::Background {
+            return None;
+        }
+        let target = running
+            .short_id
+            .as_deref()
+            .unwrap_or(&running.agent_session_id);
+        let out = run_capture(program, &["respawn", target], env);
+        Some(match out {
+            Some(out) if out.contains("respawned") => Ok(()),
+            Some(out) => Err(out.trim().lines().last().unwrap_or("").to_string()),
+            None => Err("Claude Code didn't answer".into()),
+        })
     }
 
     fn status_hints(&self) -> StatusHints {
         StatusHints {
             needs_input: vec!["do you want to proceed?", "do you want to make this edit"],
         }
+    }
+}
+
+/// Claude Code's agent panel: the list under the input box once a session has background
+/// agents. Verified live on 2.1.325:
+/// ```text
+/// ───────────────────────────────────────────── Alpha probe ─   ← label of the agent in view
+/// ❯ Message @general-purpose…
+/// ────────────────────────────────────────────────────────────
+///   ↑/↓ to select · ctrl+x ctrl+k to stop all agents
+///
+///   ◯ main
+/// ❯ ⏺ general-purpose  Alpha probe          8s · ↓ 44.7k tokens
+///   ◯ general-purpose  Beta probe           7s · ↓ 44.4k tokens
+/// ```
+/// - `⏺` marks the agent in view, `◯` the others. `main` is always first, then the
+///   *running* agents in launch order (finished ones drop out). Rows show the agent's latest
+///   activity once it has one, not its description.
+/// - On an empty input, ↓ moves into the list with the cursor (`❯`) on the agent in view;
+///   ↑/↓ move it, Enter views that agent (the list keeps focus) and Esc goes back to the input.
+///   Typing `x` in the list stops an agent, so keys are only sent while the screen shows
+///   where the cursor is.
+/// - A long list scrolls, with `↑ N more` / `↓ N more` rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentPanel {
+    /// Agents hidden above the visible rows.
+    pub above: usize,
+    /// Agents hidden below the visible rows.
+    pub below: usize,
+    /// The visible rows' text after the marker (`main`, `general-purpose  Reading …`).
+    pub rows: Vec<String>,
+    /// Index into the whole list (hidden rows included) of the agent in view.
+    pub viewed: Option<usize>,
+    /// Index into the whole list of the cursor, while the list has focus.
+    pub cursor: Option<usize>,
+    /// The label on the input box's top border: the agent in view's description (or the
+    /// session's name for `main`).
+    pub label: Option<String>,
+}
+
+impl AgentPanel {
+    /// All agents, `main` included.
+    pub fn len(&self) -> usize {
+        self.above + self.rows.len() + self.below
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+fn is_rule(row: &str) -> bool {
+    let t = row.trim();
+    t.starts_with('─') && t.chars().filter(|&c| c == '─').count() >= 10
+}
+
+/// Reads Claude Code's agent panel off the screen; `None` when it isn't showing.
+pub fn claude_agent_panel(rows: &[String]) -> Option<AgentPanel> {
+    let rules: Vec<usize> = (0..rows.len()).filter(|&i| is_rule(&rows[i])).collect();
+    let (&bottom, top) = (rules.last()?, rules.iter().rev().nth(1));
+    let label = top
+        .map(|&i| rows[i].trim_matches(|c: char| c == '─' || c.is_whitespace()))
+        .filter(|l| !l.is_empty())
+        .map(String::from);
+    let mut panel = AgentPanel {
+        above: 0,
+        below: 0,
+        rows: Vec::new(),
+        viewed: None,
+        cursor: None,
+        label,
+    };
+    let more = |t: &str, arrow: char| -> Option<usize> {
+        t.strip_prefix(arrow)?
+            .trim()
+            .strip_suffix("more")?
+            .trim()
+            .parse()
+            .ok()
+    };
+    for row in &rows[bottom + 1..] {
+        let (has_cursor, rest) = match row.strip_prefix('❯') {
+            Some(r) => (true, r),
+            None => (false, row.as_str()),
+        };
+        // Agent rows are indented; footer hints don't start with a marker.
+        if !has_cursor && !row.starts_with("  ") {
+            continue;
+        }
+        let t = rest.trim();
+        if panel.rows.is_empty()
+            && let Some(n) = more(t, '↑')
+        {
+            panel.above = n;
+            continue;
+        }
+        if !panel.rows.is_empty()
+            && let Some(n) = more(t, '↓')
+        {
+            panel.below = n;
+            break;
+        }
+        let mut chars = t.chars();
+        let viewed = match chars.next() {
+            Some('⏺' | '●') => true,
+            Some('◯' | '○') => false,
+            _ => {
+                if panel.rows.is_empty() {
+                    continue;
+                }
+                break;
+            }
+        };
+        let text = chars.as_str();
+        if !text.starts_with(' ') {
+            continue;
+        }
+        let index = panel.above + panel.rows.len();
+        if viewed {
+            panel.viewed = Some(index);
+        }
+        if has_cursor {
+            panel.cursor = Some(index);
+        }
+        panel.rows.push(text.trim().to_string());
+    }
+    // The list always starts with `main`.
+    if panel.rows.is_empty() || (panel.above == 0 && panel.rows[0] != "main") {
+        return None;
+    }
+    Some(panel)
+}
+
+/// Whether the input box's label names the agent described as `description`. The label can
+/// be cut short with `…`.
+pub fn claude_panel_label_matches(label: &str, description: &str) -> bool {
+    let label = label.trim_end_matches('…').trim();
+    let description = description.trim();
+    !label.is_empty() && (description == label || description.starts_with(label))
+}
+
+#[cfg(test)]
+mod agent_panel_tests {
+    use super::{claude_agent_panel, claude_panel_label_matches};
+
+    fn screen(text: &str) -> Vec<String> {
+        text.lines().map(String::from).collect()
+    }
+
+    const RULE: &str = "────────────────────────────────────────────────────────────";
+
+    #[test]
+    fn reads_the_panel_without_focus() {
+        let rows = screen(&format!(
+            "⏺ launched\n\n✻ Waiting for 2 background agents to finish\n\
+             ──────────────────────────────── exceptions monitor check ─\n❯ \n{RULE}\n\
+             \x20 ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 4 agents · ↓ to manage\n\n\
+             \x20 ⏺ main\n\
+             \x20 ◯ general-purpose  Alpha probe          2s · ↓ 40.0k tokens\n\
+             \x20 ◯ general-purpose  Beta probe           1s · ↑ 3 tokens\n"
+        ));
+        let p = claude_agent_panel(&rows).unwrap();
+        assert_eq!(p.len(), 3);
+        assert_eq!(p.viewed, Some(0));
+        assert_eq!(p.cursor, None);
+        assert_eq!(p.label.as_deref(), Some("exceptions monitor check"));
+        assert!(p.rows[1].starts_with("general-purpose  Alpha probe"));
+    }
+
+    #[test]
+    fn reads_the_cursor_and_the_agent_in_view() {
+        let rows = screen(&format!(
+            "─────────────────────────────────────────── Alpha probe ─\n\
+             ❯ Message @general-purpose…\n{RULE}\n\
+             \x20 ↑/↓ to select · ctrl+x ctrl+k to stop all agents\n\n\
+             \x20 ◯ main\n\
+             ❯ ⏺ general-purpose  Alpha probe          8s · ↓ 44.7k tokens\n\
+             \x20 ◯ general-purpose  Beta probe           7s · ↓ 44.4k tokens\n"
+        ));
+        let p = claude_agent_panel(&rows).unwrap();
+        assert_eq!((p.viewed, p.cursor), (Some(1), Some(1)));
+        assert!(claude_panel_label_matches(
+            p.label.as_deref().unwrap(),
+            "Alpha probe"
+        ));
+        assert!(!claude_panel_label_matches(
+            p.label.as_deref().unwrap(),
+            "Beta probe"
+        ));
+    }
+
+    #[test]
+    fn counts_hidden_rows() {
+        let rows = screen(&format!(
+            "{RULE}\n❯ \n{RULE}\n\n\
+             \x20 ↑ 2 more\n\
+             ❯ ◯ general-purpose  Misc app exceptions\n\
+             \x20 ◯ general-purpose  Infra\n\
+             \x20 ↓ 1 more\n"
+        ));
+        let p = claude_agent_panel(&rows).unwrap();
+        assert_eq!((p.above, p.below, p.len()), (2, 1, 5));
+        assert_eq!((p.viewed, p.cursor), (None, Some(2)));
+        assert_eq!(p.label, None);
+    }
+
+    #[test]
+    fn no_panel_without_background_agents() {
+        let rows = screen(&format!("⏺ done\n{RULE}\n❯ \n{RULE}\n  ? for shortcuts\n"));
+        assert_eq!(claude_agent_panel(&rows), None);
+    }
+
+    #[test]
+    fn long_labels_match_by_prefix() {
+        assert!(claude_panel_label_matches(
+            "Livewire/page-build…",
+            "Livewire/page-builder exceptions"
+        ));
+        assert!(!claude_panel_label_matches("…", "anything"));
     }
 }
 
@@ -1084,6 +1352,36 @@ mod tests {
         assert_eq!(
             claude_user_status_line(&env).as_deref(),
             Some("jq -r .model.display_name")
+        );
+    }
+
+    #[test]
+    fn windows_hooks_are_started_without_a_shell() {
+        let hook = Path::new(r"C:\Users\me\AppData\Local\Termlab\termlab-hook.exe");
+        let v = settings_json(hook, None, true);
+        let stop = &v["hooks"]["Stop"][0]["hooks"][0];
+        assert_eq!(stop["command"], hook.to_str().unwrap());
+        assert_eq!(stop["args"], json!(["claude", "Stop"]));
+        // Forward slashes: Git Bash would eat the backslashes.
+        assert_eq!(
+            v["statusLine"]["command"],
+            "C:/Users/me/AppData/Local/Termlab/termlab-hook.exe claude StatusLine"
+        );
+        // The user's own status line, or a path neither shell reads the same way: left alone.
+        assert!(
+            settings_json(hook, Some("my-line"), true)
+                .get("statusLine")
+                .is_none()
+        );
+        let spaced = Path::new(r"C:\Program Files\Termlab\termlab-hook.exe");
+        assert!(
+            settings_json(spaced, None, true)
+                .get("statusLine")
+                .is_none()
+        );
+        assert_eq!(
+            settings_json(spaced, None, true)["hooks"]["Stop"][0]["hooks"][0]["command"],
+            spaced.to_str().unwrap()
         );
     }
 

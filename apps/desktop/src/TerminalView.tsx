@@ -6,6 +6,7 @@ import "@xterm/xterm/css/xterm.css";
 import { api, type AgentId } from "./api";
 import { THEME_EVENT, terminalTheme } from "./themes";
 import { claudeNewlineHandler } from "./terminalKeys";
+import { PREFS_EVENT, getPrefs } from "./prefs";
 
 const FONT = '"JetBrains Mono", Menlo, monospace';
 const RESET = [0x1b, 0x63]; // ESC c: the daemon sends it before replaying a snapshot
@@ -42,13 +43,14 @@ export function TerminalView({
   sessionId,
   agent,
   live,
-  fontSize = 13,
+  compact = false,
   autoFocus = true,
 }: {
   sessionId: string;
   agent: AgentId;
   live: boolean;
-  fontSize?: number;
+  /** One point smaller than the chosen font size (the split pane). */
+  compact?: boolean;
   autoFocus?: boolean;
 }) {
   const host = useRef<HTMLDivElement>(null);
@@ -62,6 +64,9 @@ export function TerminalView({
     if (!el) return;
     let disposed = false;
     let cleanup = () => {};
+    const prefs = getPrefs();
+    const sizeFor = (p: typeof prefs) => Math.max(8, p.terminalFontSize - (compact ? 1 : 0));
+    const fontSize = sizeFor(prefs);
 
     // xterm measures cell size when it opens, so the font must be loaded first.
     document.fonts.load(`${fontSize}px "JetBrains Mono"`).finally(() => {
@@ -69,10 +74,11 @@ export function TerminalView({
       const term = new Terminal({
         fontFamily: FONT,
         fontSize,
-        lineHeight: 1.15,
+        lineHeight: prefs.terminalLineHeight,
         scrollback: 10_000,
         macOptionIsMeta: true,
-        cursorBlink: true,
+        cursorBlink: prefs.cursorBlink,
+        cursorStyle: prefs.cursorStyle,
         allowProposedApi: false,
         theme: terminalTheme(),
       });
@@ -96,6 +102,34 @@ export function TerminalView({
       let frame = 0;
       const send = (fn: () => Promise<unknown>) => {
         if (replaying === 0 && liveRef.current) void fn().catch(() => {});
+      };
+
+      // A replay is the daemon's raw output log, trimmed at the front and drawn at whatever
+      // sizes the session had back then, so a TUI's last frame often lands in the wrong rows.
+      // Only a resize makes the agent repaint, and the pty usually already has this size,
+      // so nudge it one row smaller and back. The second step waits for the agent to answer
+      // the first (or a timeout): Node only reports a resize when the size it reads differs,
+      // so two back-to-back changes could cancel out.
+      let onNextOutput: (() => void) | null = null;
+      let redrawTimer: ReturnType<typeof setTimeout> | undefined;
+      const forceRedraw = () => {
+        if (disposed || !liveRef.current || term.rows < 2) return;
+        if (resizeTimer) clearTimeout(resizeTimer);
+        if (redrawTimer) clearTimeout(redrawTimer);
+        const restore = () => {
+          onNextOutput = null;
+          if (redrawTimer) clearTimeout(redrawTimer);
+          redrawTimer = undefined;
+          if (!disposed && liveRef.current) void api.resize(sessionId, term.cols, term.rows).catch(() => {});
+        };
+        void api
+          .resize(sessionId, term.cols, term.rows - 1)
+          .then(() => {
+            if (disposed) return;
+            onNextOutput = restore;
+            redrawTimer = setTimeout(restore, 400);
+          })
+          .catch(() => {});
       };
       term.attachCustomKeyEventHandler(
         claudeNewlineHandler(
@@ -147,10 +181,12 @@ export function TerminalView({
               if (!disposed && liveRef.current) {
                 fit.fit();
                 term.refresh(0, term.rows - 1);
+                forceRedraw();
               }
             });
           } else {
             term.write(bytes);
+            onNextOutput?.();
           }
         })
         .then(() => {
@@ -165,6 +201,23 @@ export function TerminalView({
         term.options.theme = terminalTheme();
       };
       window.addEventListener(THEME_EVENT, onTheme);
+      // Follow Settings → Terminal: font size, line height and cursor apply in place.
+      const onPrefs = () => {
+        const p = getPrefs();
+        const size = sizeFor(p);
+        const metricsChanged = term.options.fontSize !== size || term.options.lineHeight !== p.terminalLineHeight;
+        term.options.cursorBlink = p.cursorBlink;
+        term.options.cursorStyle = p.cursorStyle;
+        if (!metricsChanged) return;
+        term.options.fontSize = size;
+        term.options.lineHeight = p.terminalLineHeight;
+        void document.fonts.load(`${size}px "JetBrains Mono"`).finally(() => {
+          if (disposed) return;
+          if (liveRef.current && replaying === 0) fit.fit();
+          term.refresh(0, term.rows - 1);
+        });
+      };
+      window.addEventListener(PREFS_EVENT, onPrefs);
 
       const ro = new ResizeObserver(() => {
         cancelAnimationFrame(frame);
@@ -181,8 +234,10 @@ export function TerminalView({
         ro.disconnect();
         el.removeEventListener("paste", onPaste, true);
         window.removeEventListener(THEME_EVENT, onTheme);
+        window.removeEventListener(PREFS_EVENT, onPrefs);
         cancelAnimationFrame(frame);
         if (resizeTimer) clearTimeout(resizeTimer);
+        if (redrawTimer) clearTimeout(redrawTimer);
         subs.forEach((s) => s.dispose());
         void api.detach(sessionId).catch(() => {});
         term.dispose();
@@ -193,7 +248,7 @@ export function TerminalView({
       disposed = true;
       cleanup();
     };
-  }, [sessionId, fontSize, autoFocus]);
+  }, [sessionId, compact, autoFocus]);
 
   // xterm's fit measures its parent's height including padding, so the padding lives on the
   // outer box and xterm gets an unpadded inner surface that's exactly the space it can use.

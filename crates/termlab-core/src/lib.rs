@@ -14,6 +14,8 @@ pub mod scrollback;
 pub mod service;
 pub mod status;
 pub mod transcript;
+pub mod transport;
+pub mod update;
 
 pub use error::{CoreError, Result};
 pub use service::{CoreEvent, DataDirs, StartRequest, Termlab, TermlabConfig};

@@ -120,6 +120,10 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE folders ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
     UPDATE folders SET sort_order = id;
     "#,
+    // 10: putting a session on hold is independent of its process status.
+    r#"
+    ALTER TABLE sessions ADD COLUMN on_hold INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 /// Migration 9 adds `folders.sort_order`. Some databases already have that column (it was
@@ -287,9 +291,9 @@ impl Db {
         self.conn.execute(
             "INSERT INTO sessions (id, folder_id, agent, title, model, permission_mode, isolation,
                 agent_session_id, status, exit_code, created_at, last_activity_at, billing,
-                start_commit, transcript_path, notify, origin, term_cols, term_rows)
+                start_commit, transcript_path, notify, origin, term_cols, term_rows, on_hold)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                     ?18, ?19)",
+                     ?18, ?19, ?20)",
             params![
                 s.id.to_string(),
                 s.folder_id,
@@ -310,6 +314,7 @@ impl Db {
                 s.origin.as_str(),
                 s.term_size.map(|t| t.cols),
                 s.term_size.map(|t| t.rows),
+                s.on_hold,
             ],
         )?;
         Ok(())
@@ -502,6 +507,16 @@ impl Db {
         )
     }
 
+    pub fn set_on_hold(&self, id: SessionId, on_hold: bool) -> Result<()> {
+        self.expect_one(
+            self.conn.execute(
+                "UPDATE sessions SET on_hold = ?2 WHERE id = ?1",
+                params![id.to_string(), on_hold],
+            )?,
+            id,
+        )
+    }
+
     /// Sessions still marked live when the background service starts belonged to a previous
     /// run of it and can't still be alive. They're marked as ended ("done", with no exit code:
     /// the agent didn't fail, Termlab stopped). Returns how many were changed.
@@ -526,7 +541,7 @@ impl Db {
 const SESSION_SELECT: &str =
     "SELECT id, folder_id, agent, title, model, permission_mode, isolation,
     agent_session_id, status, exit_code, created_at, last_activity_at, billing,
-    start_commit, transcript_path, notify, origin, term_cols, term_rows, color FROM sessions";
+    start_commit, transcript_path, notify, origin, term_cols, term_rows, color, on_hold FROM sessions";
 
 fn path_to_str(path: &Path) -> Result<&str> {
     path.to_str().ok_or_else(|| {
@@ -585,6 +600,7 @@ fn session_from_row(r: &Row<'_>) -> rusqlite::Result<SessionRecord> {
             _ => None,
         },
         color: r.get(19)?,
+        on_hold: r.get(20)?,
     })
 }
 
@@ -610,6 +626,7 @@ mod tests {
             start_commit: Some("abc123".into()),
             transcript_path: None,
             notify: true,
+            on_hold: false,
             origin: SessionOrigin::Termlab,
             term_size: None,
             color: None,
@@ -650,7 +667,8 @@ mod tests {
                      ALTER TABLE sessions DROP COLUMN term_rows;
                      ALTER TABLE sessions DROP COLUMN resume_on_start;
                      ALTER TABLE sessions DROP COLUMN agent_title;
-                     ALTER TABLE sessions DROP COLUMN color;",
+                     ALTER TABLE sessions DROP COLUMN color;
+                     ALTER TABLE sessions DROP COLUMN on_hold;",
                 )
                 .unwrap();
             db.conn.pragma_update(None, "user_version", 3).unwrap();
@@ -689,7 +707,7 @@ mod tests {
             db.add_folder("b", Path::new("/b"), 2).unwrap();
             // A database from before folder ordering: no column, schema version 8.
             db.conn
-                .execute_batch("ALTER TABLE folders DROP COLUMN sort_order;")
+                .execute_batch("ALTER TABLE folders DROP COLUMN sort_order; ALTER TABLE sessions DROP COLUMN on_hold;")
                 .unwrap();
             db.conn.pragma_update(None, "user_version", 8).unwrap();
         }
@@ -708,6 +726,9 @@ mod tests {
             // step is skipped rather than failing, and the order it had is kept.
             db.conn
                 .execute("UPDATE folders SET sort_order = 10 - id", [])
+                .unwrap();
+            db.conn
+                .execute_batch("ALTER TABLE sessions DROP COLUMN on_hold;")
                 .unwrap();
             db.conn.pragma_update(None, "user_version", 8).unwrap();
         }
@@ -753,6 +774,41 @@ mod tests {
         let d = db.add_folder("d", Path::new("/d"), 4).unwrap();
         assert_eq!(d.sort_order, 3);
         assert_eq!(ids(&db), vec![b, a, c, d.id]);
+    }
+
+    #[test]
+    fn hold_migrates_and_survives_status_updates_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hold.sqlite");
+        let db = Db::open(&path).unwrap();
+        let f = db.add_folder("api", Path::new("/src/api"), 1).unwrap();
+        let s = sample_session(f.id);
+        db.insert_session(&s).unwrap();
+        // Upgrade an existing database with sessions, before the hold column existed.
+        db.conn
+            .execute_batch("ALTER TABLE sessions DROP COLUMN on_hold;")
+            .unwrap();
+        db.conn.pragma_update(None, "user_version", 9).unwrap();
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        assert!(!db.session(s.id).unwrap().on_hold);
+        db.set_on_hold(s.id, true).unwrap();
+        db.set_status(s.id, SessionStatus::NeedsYou, 2_000).unwrap();
+        assert!(db.session(s.id).unwrap().on_hold);
+        db.set_exited(s.id, SessionStatus::Error, Some(1), 3_000)
+            .unwrap();
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        assert!(db.list_sessions().unwrap()[0].on_hold);
+        db.set_on_hold(s.id, false).unwrap();
+        let restored = db.session(s.id).unwrap();
+        assert!(!restored.on_hold);
+        assert_eq!(restored.status, SessionStatus::Error);
+        assert_eq!(restored.last_activity_at, 3_000);
+        assert!(matches!(
+            db.set_on_hold(SessionId::new(), true),
+            Err(CoreError::SessionNotFound(_))
+        ));
     }
 
     #[test]

@@ -4,6 +4,7 @@ import { AGENTS, PERMISSIONS, defaultPermission } from "./agents";
 import { Dialog } from "./Dialog";
 import { useStore } from "./store";
 import { Icon, Monogram } from "./ui";
+import { MOD_LABEL } from "./shortcuts";
 
 /** Start a different agent in the same folder, briefed from the transcript and diff. */
 export function HandOffDialog() {
@@ -32,7 +33,7 @@ export function HandOffDialog() {
     setBusy(false);
     if (s) {
       close();
-      store.select(s.id, { view: "focus", tab: "terminal" });
+      store.show(s);
     }
   }
 
@@ -158,7 +159,7 @@ export function BroadcastDialog() {
           Cancel
         </button>
         <button className="btn primary tall" disabled={!text.trim() || running === 0} onClick={() => void send()}>
-          Send to {running} <span className="mono kbd-hint">⌘↵</span>
+          Send to {running} <span className="mono kbd-hint">{MOD_LABEL}↵</span>
         </button>
       </div>
     </Dialog>

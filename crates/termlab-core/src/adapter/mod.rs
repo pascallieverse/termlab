@@ -16,9 +16,10 @@ use serde::{Deserialize, Serialize};
 
 pub use antigravity::AntigravityAdapter;
 pub use claude::{
-    ClaudeAdapter, claude_plan_windows, claude_project_dir, claude_renamed_title,
-    claude_settings_json, claude_subagents, claude_transcript_marks, claude_transcript_title,
-    claude_usage_windows, claude_user_status_line, encode_claude_path,
+    AgentPanel, ClaudeAdapter, claude_agent_panel, claude_panel_label_matches, claude_plan_windows,
+    claude_project_dir, claude_renamed_title, claude_settings_json, claude_subagents,
+    claude_transcript_marks, claude_transcript_title, claude_usage_windows,
+    claude_user_status_line, encode_claude_path,
 };
 pub use codex::{CodexAdapter, codex_find_new_rollout, codex_plan_usage, codex_rollout_path};
 pub use vibe::VibeAdapter;
@@ -105,6 +106,9 @@ pub struct CommandSpec {
     pub cwd: PathBuf,
     /// The agent's own session id, when the launch fixes it up front.
     pub agent_session_id: Option<String>,
+    /// When the command is only a client of a session running elsewhere (attaching to a
+    /// background session): the process that really runs the agent.
+    pub worker_pid: Option<u32>,
 }
 
 impl CommandSpec {
@@ -115,6 +119,7 @@ impl CommandSpec {
             env: vec![("TERMLAB_SESSION_ID".into(), req.session_id.to_string())],
             cwd: req.cwd.clone(),
             agent_session_id,
+            worker_pid: None,
         }
     }
 
@@ -180,6 +185,9 @@ pub struct RunningSession {
     /// The agent's own state, mapped to Termlab's statuses.
     pub status: Option<crate::model::SessionStatus>,
     pub started_at: Millis,
+    /// The process running the session, when the agent reports it.
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 /// Screen patterns for the generic status heuristics.
@@ -345,6 +353,17 @@ pub trait AgentAdapter: Send + Sync {
         Vec::new()
     }
 
+    /// Restarts a background session the agent runs itself, so it picks up the installed
+    /// version; its conversation is kept. `None`: this agent has no such thing.
+    fn respawn(
+        &self,
+        _running: &RunningSession,
+        _program: &Path,
+        _env: &UserEnv,
+    ) -> Option<Result<(), String>> {
+        None
+    }
+
     /// A command that attaches to a running background session.
     fn attach(&self, _running: &RunningSession, _req: &LaunchRequest) -> Option<CommandSpec> {
         None
@@ -413,7 +432,7 @@ pub(crate) fn parse_version(output: &str) -> Option<String> {
 
 /// The user's home directory, from their environment.
 pub(crate) fn home(env: &UserEnv) -> Option<PathBuf> {
-    env.get("HOME").map(PathBuf::from)
+    env.home()
 }
 
 /// What an agent's service says about the account: whether it's signed in, the plan, and

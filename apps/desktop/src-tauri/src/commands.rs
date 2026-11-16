@@ -44,6 +44,12 @@ pub fn daemon_status(state: State<'_, AppState>) -> DaemonStatus {
     state.daemon.status()
 }
 
+/// Restarts an outdated daemon now; its sessions are resumed by the new one.
+#[tauri::command]
+pub async fn restart_daemon(state: State<'_, AppState>) -> CmdResult<()> {
+    state.daemon.restart().await
+}
+
 /// Opens the user's terminal app in `cwd` running `command` (macOS: a `.command` file
 /// opened with the default terminal; Linux: `x-terminal-emulator`).
 #[tauri::command]
@@ -71,18 +77,44 @@ pub fn open_in_terminal(
             .map_err(|e| e.to_string())?;
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     {
         let _ = &state;
-        std::process::Command::new("x-terminal-emulator")
-            .arg("-e")
-            .arg("sh")
-            .arg("-lc")
-            .arg(format!("{command}; exec \"$SHELL\" -l"))
+        // `start` opens a new console window; `/k` keeps it open after the command.
+        std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "start", "", "cmd.exe", "/k"])
+            .arg(&command)
             .current_dir(&cwd)
             .spawn()
             .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(|e| format!("couldn't open a terminal: {e}"))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = &state;
+        let script = format!("{command}; exec \"${{SHELL:-sh}}\" -l");
+        // The desktop's default terminal where the system names one, then common ones.
+        // GNOME Terminal takes the command after `--`, the others after `-e`.
+        const TERMINALS: &[(&str, &str)] = &[
+            ("x-terminal-emulator", "-e"),
+            ("gnome-terminal", "--"),
+            ("konsole", "-e"),
+            ("xfce4-terminal", "-x"),
+            ("xterm", "-e"),
+        ];
+        for (terminal, flag) in TERMINALS {
+            let started = std::process::Command::new(terminal)
+                .arg(flag)
+                .args(["sh", "-lc", &script])
+                .current_dir(&cwd)
+                .spawn();
+            match started {
+                Ok(_) => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("couldn't open a terminal: {e}")),
+            }
+        }
+        Err("No terminal app was found (tried x-terminal-emulator, gnome-terminal, konsole, xfce4-terminal and xterm).".into())
     }
 }
 
@@ -159,16 +191,32 @@ pub fn open_external(url: String) -> CmdResult<()> {
     if !ok {
         return Err("only https links can be opened".into());
     }
-    #[cfg(target_os = "macos")]
-    let opener = "/usr/bin/open";
-    #[cfg(not(target_os = "macos"))]
-    let opener = "xdg-open";
-    std::process::Command::new(opener)
-        .arg(&url)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("couldn't open the link: {e}"))
+    open_url(&url).map_err(|e| format!("couldn't open the link: {e}"))
 }
+
+/// Hands a link to the system's default browser. No shell is involved, so nothing in the
+/// link is acted on.
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("/usr/bin/open");
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut cmd = std::process::Command::new("rundll32.exe");
+        cmd.arg("url.dll,FileProtocolHandler");
+        cmd
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(url).spawn().map(|_| ())
+}
+
+/// macOS always has curl at this path. Windows 10 and later ship one too, and on Linux it
+/// is found on the PATH when installed.
+const CURL: &str = if cfg!(target_os = "macos") {
+    "/usr/bin/curl"
+} else {
+    "curl"
+};
 
 /// The video a YouTube channel is live-streaming now, from its `/live` page's canonical link.
 /// The sidebar's music stations use it when their stream restarted under a new video id.
@@ -184,8 +232,8 @@ pub async fn youtube_live_video(channel: String) -> CmdResult<Option<String>> {
         return Err("not a YouTube channel id".into());
     }
     let url = format!("https://www.youtube.com/channel/{channel}/live");
-    let out = tokio::process::Command::new("/usr/bin/curl")
-        .args([
+    let mut curl = tokio::process::Command::new(CURL);
+    curl.args([
             "-sL",
             "--max-time",
             "10",
@@ -197,7 +245,11 @@ pub async fn youtube_live_video(channel: String) -> CmdResult<Option<String>> {
             "-H",
             "Cookie: SOCS=CAI",
             &url,
-        ])
+        ]);
+    // Without this a console window flashes up on Windows (`CREATE_NO_WINDOW`).
+    #[cfg(windows)]
+    curl.creation_flags(0x0800_0000);
+    let out = curl
         .output()
         .await
         .map_err(|e| format!("couldn't reach YouTube: {e}"))?;

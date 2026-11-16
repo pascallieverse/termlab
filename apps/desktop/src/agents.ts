@@ -51,7 +51,7 @@ export function permissionLabel(p: PermissionPreset | null): string {
 }
 
 export function needsAttention(s: Session): boolean {
-  return s.status === "needs_you" || s.status === "error";
+  return !s.onHold && (s.status === "needs_you" || s.status === "error");
 }
 
 export function relativeTime(ms: number, now = Date.now()): string {

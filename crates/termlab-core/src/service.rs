@@ -32,6 +32,7 @@ use crate::pty::{Attachment, ExitInfo, PtyProcess, SpawnSpec};
 use crate::scrollback::{self, DEFAULT_SCROLLBACK_BYTES, Scrollback};
 use crate::status::{self, answer_keys, heuristic_status, parse_prompt};
 use crate::transcript::{self, Progress, TimelineEntry, TimelineKind};
+use crate::update::ProgramWatch;
 
 const MONITOR_INTERVAL: Duration = Duration::from_millis(500);
 const USAGE_INTERVAL_MS: Millis = 5_000;
@@ -51,6 +52,7 @@ const IDLE_HOOK_GRACE_MS: Millis = 1_500;
 const SUBMIT_DELAY: Duration = Duration::from_millis(60);
 /// Live scrollback is also saved this often, in case the daemon dies.
 const SCROLLBACK_SAVE_INTERVAL_MS: Millis = 30_000;
+const UPDATE_CHECK_INTERVAL_MS: Millis = 30_000;
 
 /// Where Termlab keeps its files.
 #[derive(Debug, Clone)]
@@ -80,12 +82,12 @@ impl DataDirs {
 
     /// Where `termlab-hook` delivers events.
     pub fn hook_socket(&self) -> PathBuf {
-        self.root.join("hook.sock")
+        crate::transport::address(&self.root.join("hook.sock"))
     }
 
     /// Where the app talks to `termlabd`.
     pub fn daemon_socket(&self) -> PathBuf {
-        self.root.join("termlabd.sock")
+        crate::transport::address(&self.root.join("termlabd.sock"))
     }
 
     pub fn claude_settings_path(&self) -> PathBuf {
@@ -105,6 +107,9 @@ pub struct TermlabConfig {
     pub scrollback_cap: usize,
     /// The `termlab-hook` binary; `None` disables hooks (screen heuristics only).
     pub hook_binary: Option<PathBuf>,
+    /// How often a running session is checked for an agent update installed since it
+    /// started.
+    pub update_check_ms: Millis,
 }
 
 impl TermlabConfig {
@@ -115,6 +120,7 @@ impl TermlabConfig {
             adapters: all_adapters(),
             scrollback_cap: DEFAULT_SCROLLBACK_BYTES,
             hook_binary: None,
+            update_check_ms: UPDATE_CHECK_INTERVAL_MS,
         }
     }
 }
@@ -249,6 +255,10 @@ struct LiveMeta {
     rename_scan: Option<(PathBuf, u64)>,
     /// The session's sub-agents: working now, or just finished.
     subagents: Vec<SubAgent>,
+    /// The agent program this session started with, to notice an update installed since.
+    watch: Option<ProgramWatch>,
+    update_checked_at: Millis,
+    update_ready: bool,
 }
 
 pub struct Termlab {
@@ -698,6 +708,7 @@ impl Termlab {
                 .filter(|_| live)
                 .map(|m| m.subagents.clone())
                 .unwrap_or_default(),
+            update_ready: live && m.is_some_and(|m| m.update_ready),
             live,
             preview: m.map(|m| m.preview.clone()).unwrap_or_default(),
             approval: m.and_then(|m| m.approval.clone()),
@@ -768,6 +779,7 @@ impl Termlab {
             start_commit: git::head_commit(&self.config.env, &folder.path),
             transcript_path: None,
             notify: req.notify,
+            on_hold: false,
             origin: if matches!(req.mode, StartMode::Attach { .. }) {
                 SessionOrigin::Attached
             } else {
@@ -876,10 +888,13 @@ impl Termlab {
         };
         tracing::info!(session = %id, command = %spec.display(), "starting session");
         let pty = Arc::new(PtyProcess::spawn_with_history(&spawn, scrollback)?);
-        self.meta
-            .lock()
-            .expect("meta lock")
-            .insert(id, LiveMeta::default());
+        self.meta.lock().expect("meta lock").insert(
+            id,
+            LiveMeta {
+                watch: Some(ProgramWatch::start(&spec.program, spec.worker_pid)),
+                ..LiveMeta::default()
+            },
+        );
         self.live
             .write()
             .expect("live lock")
@@ -1010,6 +1025,104 @@ impl Termlab {
         Ok(())
     }
 
+    /// Switches Claude Code's terminal to one of its sub-agents (`None`: back to the main
+    /// conversation), by driving the agent list under its input box (see [`PanelDriver`]).
+    ///
+    /// Claude lists `main`, then its running agents in launch order, which is usually where
+    /// Termlab's own list puts them too. Agents start and finish all the time, though, so the
+    /// row is only a first guess: after viewing it, the label on the input box (the agent's
+    /// description) confirms it, and the other rows are tried when it doesn't match.
+    pub fn view_subagent(&self, id: SessionId, subagent: Option<&str>) -> Result<()> {
+        use crate::adapter::claude_panel_label_matches;
+        let pty = self.live(id)?;
+        if self.record(id)?.agent != AgentId::Claude {
+            return Err(CoreError::InvalidInput(
+                "only Claude Code lists its sub-agents in the terminal".into(),
+            ));
+        }
+        let (guess, description) = match subagent {
+            None => (0, None),
+            Some(sub) => {
+                let meta = self.meta.lock().expect("meta lock");
+                let list = meta
+                    .get(&id)
+                    .map(|m| m.subagents.as_slice())
+                    .unwrap_or_default();
+                let agent = list.iter().find(|a| a.id == sub).ok_or_else(|| {
+                    CoreError::InvalidInput("that sub-agent isn't running any more".into())
+                })?;
+                let guess = list
+                    .iter()
+                    .filter(|a| a.running)
+                    .position(|a| a.id == sub)
+                    .map_or(1, |p| p + 1);
+                (guess, agent.description.clone())
+            }
+        };
+        let panel_driver = PanelDriver { pty: &pty };
+        let Some(panel) = panel_driver.read()? else {
+            // No agent list: nothing but the main conversation to show.
+            return if subagent.is_none() {
+                Ok(())
+            } else {
+                Err(CoreError::InvalidInput(
+                    "Claude has no sub-agents running right now (that one has stopped)".into(),
+                ))
+            };
+        };
+        let Some(description) = description else {
+            if guess >= panel.len() {
+                return Err(PanelDriver::unavailable(
+                    "that sub-agent isn't in Claude's list",
+                ));
+            }
+            // Main, or an agent without a description to check against: go by position.
+            if panel.cursor.is_none() && panel.viewed == Some(guess) {
+                return Ok(());
+            }
+            panel_driver.go_to(guess)?;
+            panel_driver.view(guess)?;
+            return panel_driver.leave();
+        };
+        let is_target = |label: Option<&str>| {
+            label.is_some_and(|l| claude_panel_label_matches(l, &description))
+        };
+        if panel.cursor.is_none()
+            && panel.viewed.is_some_and(|v| v > 0)
+            && is_target(panel.label.as_deref())
+        {
+            return Ok(());
+        }
+        // Rows still showing the description first, then the guessed row, then the rest.
+        let mut candidates: Vec<usize> = panel
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.contains(description.as_str()))
+            .map(|(i, _)| panel.above + i)
+            .collect();
+        candidates.push(guess);
+        candidates.extend(1..panel.len());
+        let mut seen = HashSet::new();
+        candidates.retain(|&c| c > 0 && c < panel.len() && seen.insert(c));
+        let original = panel.viewed;
+        for c in candidates {
+            panel_driver.go_to(c)?;
+            if is_target(panel_driver.view(c)?.label.as_deref()) {
+                return panel_driver.leave();
+            }
+        }
+        // Not there (it just finished?): put back what the user was looking at.
+        if let Some(o) = original {
+            panel_driver.go_to(o)?;
+            panel_driver.view(o)?;
+        }
+        panel_driver.leave()?;
+        Err(CoreError::InvalidInput(
+            "that sub-agent isn't in Claude's list any more (it may have just finished)".into(),
+        ))
+    }
+
     pub fn resize(&self, id: SessionId, size: TermSize) -> Result<()> {
         self.live(id)?.resize(size)?;
         // Remembered so the saved output replays at the size it was drawn at.
@@ -1021,6 +1134,36 @@ impl Termlab {
         let pty = self.live(id)?;
         self.stop_requested.lock().expect("stop lock").insert(id);
         pty.kill()
+    }
+
+    /// Restarts a background session the agent runs itself (one Termlab is attached to),
+    /// so it runs the installed version. Termlab's own window onto it closes with that;
+    /// `restart` attaches again.
+    pub fn respawn(&self, id: SessionId) -> Result<()> {
+        let rec = self.record(id)?;
+        let not_possible = || {
+            CoreError::InvalidInput(format!(
+                "{} can't restart this session itself",
+                rec.agent.display_name()
+            ))
+        };
+        if rec.origin != SessionOrigin::Attached {
+            return Err(not_possible());
+        }
+        let agent_session_id = rec.agent_session_id.clone().ok_or_else(not_possible)?;
+        let running = self
+            .external_sessions()
+            .into_iter()
+            .map(|e| e.running)
+            .find(|r| r.agent == rec.agent && r.agent_session_id == agent_session_id)
+            .ok_or_else(|| {
+                CoreError::InvalidInput("that background session isn't running any more".into())
+            })?;
+        let program = self.installed(rec.agent)?.path;
+        self.adapter(rec.agent)?
+            .respawn(&running, &program, &self.config.env)
+            .ok_or_else(not_possible)?
+            .map_err(CoreError::InvalidInput)
     }
 
     /// Stops the idle sessions in a folder. Returns how many were stopped.
@@ -1061,6 +1204,12 @@ impl Termlab {
 
     pub fn set_title(&self, id: SessionId, title: &str) -> Result<()> {
         self.db().set_title(id, title.trim())?;
+        self.emit_session(id);
+        Ok(())
+    }
+
+    pub fn set_on_hold(&self, id: SessionId, on_hold: bool) -> Result<()> {
+        self.db().set_on_hold(id, on_hold)?;
         self.emit_session(id);
         Ok(())
     }
@@ -1201,11 +1350,16 @@ impl Termlab {
 
     /// The session's sub-agents worth showing: those working now and those that finished in
     /// the last few minutes, working ones first, in the order they started.
+    ///
+    /// Background agents live in the agent's process, so with `process_started` (when that
+    /// process started) those silent since then aren't working: they died with the previous
+    /// process (a Termlab restart, say), however recently they last wrote.
     fn read_subagents(
         &self,
         rec: &SessionRecord,
         cwd: Option<&Path>,
         now: Millis,
+        process_started: Option<Millis>,
     ) -> Vec<SubAgent> {
         let Some(asid) = rec.agent_session_id.as_deref() else {
             return Vec::new();
@@ -1221,6 +1375,11 @@ impl Termlab {
             now,
             &self.config.env,
         );
+        if let Some(started) = process_started {
+            for a in list.iter_mut().filter(|a| a.last_activity_at < started) {
+                a.running = false;
+            }
+        }
         list.retain(|a| a.running || now - a.last_activity_at < SUBAGENT_RECENT_MS);
         list.sort_by(|a, b| {
             b.running
@@ -1580,6 +1739,7 @@ impl Termlab {
                     .then(|| past.path.to_string_lossy().into_owned()),
                 notify: true,
                 origin: SessionOrigin::Imported,
+                on_hold: false,
                 term_size: None,
                 color: None,
             };
@@ -1660,21 +1820,20 @@ impl Termlab {
 
     // ---- hooks ----------------------------------------------------------------
 
-    /// Listens for `termlab-hook` messages on a Unix socket.
+    /// Listens for `termlab-hook` messages on a local socket (a named pipe on Windows).
     pub fn serve_hooks(self: &Arc<Self>, path: &Path) -> Result<()> {
-        let _ = std::fs::remove_file(path);
-        let listener = {
+        let mut listener = {
             let _guard = self.rt.enter();
-            tokio::net::UnixListener::bind(path)?
+            crate::transport::Listener::bind(path)?
         };
-        restrict_permissions(path);
         // Messages are applied one at a time in arrival order: an agent's hooks fire in
         // sequence (PreToolUse, then PermissionRequest…) and must not overtake each other.
         // `termlab-hook` writes and disconnects at once, so reading in turn is cheap.
         let weak = Arc::downgrade(self);
         self.rt.spawn(async move {
             loop {
-                let Ok((mut stream, _)) = listener.accept().await else {
+                let Ok(mut stream) = listener.accept().await else {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 };
                 let mut buf = Vec::new();
@@ -1685,7 +1844,9 @@ impl Termlab {
                         .read_to_end(&mut buf),
                 )
                 .await;
-                if !matches!(read, Ok(Ok(_))) {
+                // A Windows pipe reports the sender closing as an error, after the message
+                // arrived: what was read still counts. Only a sender that stalls is dropped.
+                if read.is_err() {
                     continue;
                 }
                 let Some(this) = weak.upgrade() else { return };
@@ -1813,15 +1974,21 @@ impl Termlab {
         let prompt = parse_prompt(&screen.rows);
 
         // Slow work outside the meta lock.
-        let (need_usage, need_id) = {
+        let (need_usage, need_id, update_watch) = {
             let meta = self.meta.lock().expect("meta lock");
             let m = meta.get(&id);
             (
                 m.is_none_or(|m| now - m.usage_checked_at >= USAGE_INTERVAL_MS),
                 rec.agent_session_id.is_none()
                     && m.is_none_or(|m| now - m.id_checked_at >= ID_CHECK_INTERVAL_MS),
+                // Once an update is known, it stays known until the session restarts.
+                m.filter(|m| {
+                    !m.update_ready && now - m.update_checked_at >= self.config.update_check_ms
+                })
+                .and_then(|m| m.watch.clone()),
             )
         };
+        let outdated = update_watch.map(|w| w.outdated());
         let folder = self.db().folder(rec.folder_id).ok();
         // Agents that pick their own session id (Codex, Vibe): find it on disk, so the
         // session can be resumed.
@@ -1852,8 +2019,17 @@ impl Termlab {
         } else {
             None
         };
-        let subagents = need_usage
-            .then(|| self.read_subagents(&rec, folder.as_ref().map(|f| f.path.as_path()), now));
+        // Not for attached sessions: their agents run in the agent's own background service,
+        // not in the process Termlab started.
+        let process_started = (rec.origin != SessionOrigin::Attached).then(|| pty.started_at());
+        let subagents = need_usage.then(|| {
+            self.read_subagents(
+                &rec,
+                folder.as_ref().map(|f| f.path.as_path()),
+                now,
+                process_started,
+            )
+        });
         // A placeholder title ("New Claude Code session") gives way to the agent's own
         // title for the conversation once it has one.
         let mut retitled = false;
@@ -1879,6 +2055,13 @@ impl Termlab {
             let m = meta.entry(id).or_default();
             if need_id {
                 m.id_checked_at = now;
+            }
+            if let Some(outdated) = outdated {
+                m.update_checked_at = now;
+                if outdated {
+                    m.update_ready = true;
+                    changed = true;
+                }
             }
             if need_usage {
                 m.usage_checked_at = now;
@@ -2016,15 +2199,6 @@ fn monitor_loop(weak: Weak<Termlab>) {
     }
 }
 
-/// Owner-only access for sockets in the data dir.
-pub fn restrict_permissions(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-}
-
 fn load_plan_usage(path: &Path) -> HashMap<AgentId, PlanUsage> {
     let Ok(bytes) = std::fs::read(path) else {
         return HashMap::new();
@@ -2075,5 +2249,118 @@ fn default_title(req: &StartRequest) -> String {
             StartMode::Fork { .. } => format!("Forked {} session", req.agent.display_name()),
             StartMode::Attach { .. } => format!("{} background session", req.agent.display_name()),
         },
+    }
+}
+
+/// Drives Claude Code's agent list one key at a time. Every key waits for the screen to show
+/// its effect before the next is sent, so a slow redraw can't make the cursor overshoot, and
+/// keys only go out while the screen shows where the cursor is: typed into the list, `x`
+/// would stop an agent.
+struct PanelDriver<'a> {
+    pty: &'a PtyProcess,
+}
+
+impl PanelDriver<'_> {
+    const KEY_TIMEOUT: Duration = Duration::from_millis(1500);
+
+    fn unavailable(why: &str) -> CoreError {
+        CoreError::InvalidInput(format!(
+            "{why} — pick it in the terminal (↓ from an empty prompt)"
+        ))
+    }
+
+    /// The agent list, or `None` when there is none. Errors while a prompt is on screen,
+    /// where arrow keys would move the prompt's selection instead.
+    fn read(&self) -> Result<Option<crate::adapter::AgentPanel>> {
+        let screen = self.pty.screen();
+        if parse_prompt(&screen.rows).is_some() {
+            return Err(CoreError::InvalidInput(
+                "answer Claude's prompt first".into(),
+            ));
+        }
+        Ok(crate::adapter::claude_agent_panel(&screen.rows))
+    }
+
+    fn panel(&self) -> Result<crate::adapter::AgentPanel> {
+        self.read()?
+            .ok_or_else(|| Self::unavailable("Claude's agent list went away"))
+    }
+
+    fn key(&self, key: &[u8]) -> Result<()> {
+        self.pty.write(key.to_vec())
+    }
+
+    fn arrow(&self, down: bool) -> Result<()> {
+        let app = self.pty.screen().application_cursor;
+        self.key(match (app, down) {
+            (true, true) => b"\x1bOB",
+            (true, false) => b"\x1bOA",
+            (false, true) => b"\x1b[B",
+            (false, false) => b"\x1b[A",
+        })
+    }
+
+    /// Polls the list until `done` holds.
+    fn wait(
+        &self,
+        done: impl Fn(&crate::adapter::AgentPanel) -> bool,
+    ) -> Result<crate::adapter::AgentPanel> {
+        let deadline = std::time::Instant::now() + Self::KEY_TIMEOUT;
+        loop {
+            std::thread::sleep(Duration::from_millis(25));
+            if let Some(p) = self.read()?
+                && done(&p)
+            {
+                return Ok(p);
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(Self::unavailable("Claude's agent list didn't respond"));
+            }
+        }
+    }
+
+    /// Moves the cursor onto `target`, giving the list focus first.
+    fn go_to(&self, target: usize) -> Result<()> {
+        let mut panel = self.panel()?;
+        if panel.cursor.is_none() {
+            // ↓ on an empty input moves into the list.
+            self.arrow(true)?;
+            panel = self.wait(|p| p.cursor.is_some()).map_err(|_| {
+                Self::unavailable("Claude didn't move into its agent list (is the input empty?)")
+            })?;
+        }
+        for _ in 0..64 {
+            let Some(cursor) = panel.cursor else {
+                return Err(Self::unavailable("Claude's agent list lost focus"));
+            };
+            if cursor == target {
+                return Ok(());
+            }
+            if target >= panel.len() {
+                return Err(Self::unavailable("Claude's agent list changed"));
+            }
+            self.arrow(cursor < target)?;
+            panel = self.wait(|p| p.cursor != Some(cursor))?;
+        }
+        Err(Self::unavailable(
+            "couldn't reach that row in Claude's agent list",
+        ))
+    }
+
+    /// Views the agent under the cursor (which `go_to` put on `target`).
+    fn view(&self, target: usize) -> Result<crate::adapter::AgentPanel> {
+        self.key(b"\r")?;
+        self.wait(|p| p.viewed == Some(target))?;
+        // The input box's label is redrawn with the view; give it a frame to land.
+        std::thread::sleep(Duration::from_millis(60));
+        self.panel()
+    }
+
+    /// Hands focus back to the input, so typing goes to the agent instead of the list.
+    fn leave(&self) -> Result<()> {
+        if self.panel()?.cursor.is_some() {
+            self.key(b"\x1b")?;
+        }
+        Ok(())
     }
 }

@@ -21,6 +21,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 pub struct DaemonStatus {
     pub connected: bool,
     pub message: Option<String>,
+    /// Connected to a daemon from an older build, kept because it runs sessions.
+    pub outdated: bool,
 }
 
 pub struct Daemon {
@@ -29,7 +31,7 @@ pub struct Daemon {
     /// Terminal views currently showing each session.
     views: Mutex<HashMap<SessionId, Channel<InvokeResponseBody>>>,
     status: Mutex<DaemonStatus>,
-    /// Set (to its session count) when the daemon is an older protocol kept for its sessions.
+    /// Set (to its session count) when the daemon is an older build kept for its sessions.
     outdated: Mutex<Option<usize>>,
 }
 
@@ -42,6 +44,7 @@ impl Daemon {
             status: Mutex::new(DaemonStatus {
                 connected: false,
                 message: Some("Starting the Termlab background service…".into()),
+                outdated: false,
             }),
             outdated: Mutex::new(None),
         })
@@ -52,7 +55,12 @@ impl Daemon {
     }
 
     fn set_status(&self, app: &AppHandle, connected: bool, message: Option<String>) {
-        let s = DaemonStatus { connected, message };
+        let outdated = connected && self.outdated.lock().expect("outdated lock").is_some();
+        let s = DaemonStatus {
+            connected,
+            message,
+            outdated,
+        };
         *self.status.lock().expect("status lock") = s.clone();
         let _ = app.emit("daemon-status", s);
     }
@@ -63,6 +71,15 @@ impl Daemon {
             .expect("client lock")
             .clone()
             .ok_or_else(|| "Not connected to the Termlab background service yet".to_string())
+    }
+
+    /// Stops the daemon even with sessions running; the connection loop then starts the
+    /// installed one, which resumes those sessions (see "Sessions survive a background-service
+    /// restart" in docs/agent-notes.md).
+    pub async fn restart(&self) -> Result<(), String> {
+        let _ = self.call(Request::Shutdown { force: true }).await?;
+        wait_gone(&self.dirs.daemon_socket()).await;
+        Ok(())
     }
 
     pub async fn call(&self, req: Request) -> Result<serde_json::Value, String> {
@@ -96,8 +113,8 @@ impl Daemon {
                         true,
                         outdated.map(|n| {
                             format!(
-                                "Termlab's background service is from an older version and is running {n} session{}. \
-                                 New features need a restart: quit Termlab once those sessions are done, and it restarts on next launch.",
+                                "Termlab's background service is from an older build and is running {n} session{}, \
+                                 so newer features aren't available yet. Restarting it reopens those sessions.",
                                 if n == 1 { "" } else { "s" }
                             )
                         }),
@@ -190,6 +207,9 @@ impl Daemon {
             }
         }
         let bin = sibling_binary("termlabd").ok_or("termlabd wasn't found next to the app")?;
+        // A daemon started now is the installed build: clear what an older one left behind,
+        // or its banner would outlive it.
+        *self.outdated.lock().expect("outdated lock") = None;
         spawn_detached(&bin, &self.dirs.root)
             .map_err(|e| format!("couldn't start termlabd: {e}"))?;
         let start = tokio::time::Instant::now();
@@ -224,11 +244,12 @@ impl Daemon {
             }
             .into());
         }
-        if stale_protocol {
+        if stale_protocol || newer_binary {
             tracing::warn!(
-                "termlabd speaks protocol {} (app {}) but has running sessions; keeping it",
-                info.protocol,
-                PROTOCOL_VERSION
+                protocol = info.protocol,
+                app_protocol = PROTOCOL_VERSION,
+                newer_binary,
+                "termlabd is outdated but has running sessions; keeping it"
             );
             *self.outdated.lock().expect("outdated lock") = Some(info.live_sessions);
         } else {
@@ -248,22 +269,36 @@ async fn wait_gone(socket: &Path) {
 }
 
 /// `termlabd` and `termlab-hook` ship next to the app's executable (Contents/MacOS in the
-/// bundle; target/<profile> in development).
+/// macOS bundle, the install folder on Windows, `/usr/bin` on Linux; target/<profile> in
+/// development).
 pub fn sibling_binary(name: &str) -> Option<PathBuf> {
-    let p = std::env::current_exe().ok()?.parent()?.join(name);
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    let p = std::env::current_exe().ok()?.parent()?.join(file);
     p.exists().then_some(p)
 }
 
 /// Starts the daemon in its own process group, so it outlives the app.
 fn spawn_detached(bin: &Path, data_dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new(bin);
     cmd.arg("--data-dir")
         .arg(data_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0);
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Its own group, and a console of its own that is never shown: the programs it
+        // starts (git, the agents' CLIs) use that one instead of each opening a window.
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
     let mut child = cmd.spawn()?;
     // Reap it if it exits while the app is still running.
     std::thread::spawn(move || {

@@ -8,7 +8,7 @@
 //! - waiter: waits for the child to exit, lets the reader drain, then publishes the exit
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
@@ -117,6 +117,32 @@ pub struct PtyProcess {
     pid: Option<u32>,
     last_output_at: Arc<AtomicI64>,
     last_input_at: AtomicI64,
+    /// When the process was started (ms since the epoch).
+    started_at: Millis,
+}
+
+/// The command that starts `program`. On Windows, npm installs agents as `.cmd` scripts,
+/// which only the command interpreter can run; it would also act on a few characters in
+/// the arguments, so those are refused rather than passed on.
+fn command_for(program: &Path, args: &[String]) -> Result<CommandBuilder> {
+    let script = cfg!(windows)
+        && program
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+    if !script {
+        return Ok(CommandBuilder::new(program));
+    }
+    const ACTED_ON: &[char] = &['&', '|', '<', '>', '^', '%', '!', '\r', '\n'];
+    if let Some(arg) = args.iter().find(|a| a.contains(ACTED_ON)) {
+        return Err(CoreError::Pty(format!(
+            "{} is a script, and `{arg}` can't be passed to a script safely",
+            program.display()
+        )));
+    }
+    let mut cmd = CommandBuilder::new("cmd.exe");
+    cmd.args(["/d", "/c"]);
+    cmd.arg(program);
+    Ok(cmd)
 }
 
 impl PtyProcess {
@@ -133,7 +159,7 @@ impl PtyProcess {
             .openpty(pty_size(spec.size))
             .map_err(|e| CoreError::Pty(e.to_string()))?;
 
-        let mut cmd = CommandBuilder::new(&spec.program);
+        let mut cmd = command_for(&spec.program, &spec.args)?;
         cmd.args(&spec.args);
         cmd.cwd(&spec.cwd);
         cmd.env_clear();
@@ -261,6 +287,7 @@ impl PtyProcess {
             pid,
             last_output_at,
             last_input_at: AtomicI64::new(0),
+            started_at: crate::model::now_ms(),
         })
     }
 
@@ -319,6 +346,11 @@ impl PtyProcess {
     /// When input was last written to the terminal (0 if never).
     pub fn last_input_at(&self) -> Millis {
         self.last_input_at.load(Ordering::Relaxed)
+    }
+
+    /// When the process was started (ms since the epoch).
+    pub fn started_at(&self) -> Millis {
+        self.started_at
     }
 
     pub fn last_output_at(&self) -> Millis {

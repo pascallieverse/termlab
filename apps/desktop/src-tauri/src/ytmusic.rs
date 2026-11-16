@@ -118,10 +118,7 @@ fn may_return_home() -> bool {
 }
 
 fn open_in_browser(url: &str) {
-    #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
-    #[cfg(not(target_os = "macos"))]
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    let _ = crate::commands::open_url(url);
 }
 
 /// Where the frontend wants the page, in CSS pixels from the window's top-left corner.

@@ -86,6 +86,7 @@ export interface Session {
   startCommit: string | null;
   transcriptPath: string | null;
   notify: boolean;
+  onHold: boolean;
   origin: "termlab" | "imported" | "attached";
   /** A colour set inside the agent (Claude's /color): red, blue, green, yellow, purple, orange, pink or cyan. */
   color?: string | null;
@@ -97,6 +98,8 @@ export interface Session {
   apiKeyVars: string[];
   /** Sub-agents of a running session: working now, or just finished. */
   subagents?: SubAgent[];
+  /** A different version of the agent was installed after this session started; restarting runs it. */
+  updateReady?: boolean;
 }
 
 export interface Installed {
@@ -208,9 +211,21 @@ export type CoreEvent =
   | { type: "sessionRemoved"; id: string }
   | { type: "foldersChanged" };
 
+/** What a look for a newer Termlab found. */
+export interface UpdateCheck {
+  /** False in builds that weren't set up for updates (development builds among them). */
+  supported: boolean;
+  currentVersion: string;
+  /** The newer version, when there is one. */
+  version: string | null;
+  notes: string | null;
+}
+
 export interface DaemonStatus {
   connected: boolean;
   message: string | null;
+  /** Connected to a background service from an older build, kept for its sessions. */
+  outdated?: boolean;
 }
 
 function call<T>(method: string, params?: unknown): Promise<T> {
@@ -239,6 +254,8 @@ export const api = {
   startSession: (request: StartRequest, id?: string) =>
     call<Session>("startSession", { request: withDefaults(request), id: id ?? null }),
   restart: (id: string, size?: TermSize) => call<Session>("restart", { id, size: size ?? null }),
+  /** Asks the agent to restart a background session it runs itself (one Termlab is attached to). */
+  respawn: (id: string) => call<null>("respawn", { id }),
   fork: (id: string) => call<Session>("fork", { id, size: null }),
   handoffMessage: (id: string) => call<string>("handoffMessage", { id }),
   handOff: (id: string, agent: AgentId, permission: PermissionPreset, model: string | null) =>
@@ -253,9 +270,12 @@ export const api = {
   stopIdle: (folderId: number) => call<number>("stopIdle", { folderId }),
   deleteSession: (id: string) => call<null>("delete", { id }),
   setTitle: (id: string, title: string) => call<null>("setTitle", { id, title }),
+  setOnHold: (id: string, onHold: boolean) => call<null>("setOnHold", { id, onHold }),
   details: (id: string) => call<SessionDetails>("details", { id }),
   diff: (id: string) => call<string>("diff", { id }),
   timeline: (id: string) => call<TimelineEntry[]>("timeline", { id }),
+  /** Switches Claude's terminal to one of its sub-agents (null: back to the main conversation). */
+  viewSubagent: (id: string, subagent: string | null) => call<null>("viewSubagent", { id, subagent }),
   /** What one of a session's sub-agents did. */
   subagentTimeline: (id: string, subagent: string) =>
     call<TimelineEntry[]>("subagentTimeline", { id, subagent }),
@@ -277,6 +297,8 @@ export const api = {
   },
   detach: (id: string) => invoke<null>("detach_session", { id }),
   daemonStatus: () => invoke<DaemonStatus>("daemon_status"),
+  /** Restarts an outdated background service; the new one resumes its sessions. */
+  restartDaemon: () => invoke<null>("restart_daemon"),
   /**
    * Shows YouTube Music (music.youtube.com, in its own web view) over `rect` of the window,
    * in CSS pixels. `zoom` below 1 shrinks the page to fit the sidebar.
@@ -301,6 +323,8 @@ export const api = {
   setSystemVolume: (volume: number) => invoke<null>("set_system_volume", { volume }),
   /** Opens an https link in the user's browser. */
   openExternal: (url: string) => invoke<null>("open_external", { url }),
+  updateCheck: () => invoke<UpdateCheck>("update_check"),
+  updateInstall: () => invoke<null>("update_install"),
   openInTerminal: (cwd: string, command: string) =>
     invoke<null>("open_in_terminal", { cwd, command }),
 };

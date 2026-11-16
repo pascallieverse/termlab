@@ -6,6 +6,7 @@ import { useContextMenu } from "./ContextMenu";
 import { sessionMenu } from "./sessionMenu";
 import { useStore } from "./store";
 import { Icon, Monogram, StatusPill } from "./ui";
+import { shortcutLabel } from "./shortcuts";
 
 type GroupBy = "folder" | "agent" | "status";
 
@@ -14,7 +15,7 @@ const STATUS_ORDER: Session["status"][] = ["needs_you", "error", "running", "idl
 /** All sessions as tiles with live previews. */
 export function MissionControl() {
   const store = useStore();
-  const { sessions, folders, home } = store;
+  const { visibleSessions: sessions, folders, home } = store;
   const [groupBy, setGroupBy] = useState<GroupBy>("folder");
   const waiting = sessions.filter(needsAttention);
   const menu = useContextMenu();
@@ -84,7 +85,7 @@ export function MissionControl() {
       )}
 
       {sessions.length === 0 && (
-        <div className="pane-message">No sessions yet. Start one with ⌘N.</div>
+          <div className="pane-message">{store.sessionFilter === "on_hold" ? "No sessions on hold." : `No active sessions. Start one with ${shortcutLabel("newSession") || "New session"}.`}</div>
       )}
 
       {groups.map((g) =>

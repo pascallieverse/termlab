@@ -23,13 +23,12 @@ test("waits for exit before resuming the same session", async () => {
     },
   };
   assert.equal(await restartSession(session.id, api, true, async () => { events.push("wait"); }), resumed);
-  assert.deepEqual(events, ["read", "stop", "read", "wait", "read", "restart"]);
+  assert.deepEqual(events, ["read", "stop", "wait", "read", "wait", "read", "restart"]);
 });
 
 test("refuses unsafe restarts before stopping", async () => {
   for (const [data, canResume] of [
     [{ ...session, agentSessionId: null }, true],
-    [{ ...session, origin: "attached" }, true],
     [session, false],
   ]) {
     await assert.rejects(restartSession(session.id, {

@@ -4,6 +4,7 @@ import { AGENTS, STATUS, tildify } from "./agents";
 import { Dialog } from "./Dialog";
 import { useStore } from "./store";
 import { Icon, Kbd, Monogram } from "./ui";
+import { MOD_LABEL, shortcutLabel } from "./shortcuts";
 
 interface Item {
   id: string;
@@ -47,7 +48,7 @@ export function Palette() {
 
   const items = useMemo(() => {
     const out: Item[] = [];
-    for (const s of store.sessions) {
+    for (const s of store.visibleSessions) {
       const f = store.folderOf(s);
       out.push({
         id: `s:${s.id}`,
@@ -77,10 +78,20 @@ export function Palette() {
         label: `Hand off “${current.title}” to another agent`,
         kind: "command",
         icon: <Icon name="arrow" size={16} />,
-        right: <Kbd>⌘⇧H</Kbd>,
+        right: shortcutLabel("handOff") ? <Kbd>{shortcutLabel("handOff")}</Kbd> : undefined,
         run: () => store.setHandOffFor(current.id),
       });
     }
+    out.push({
+      id: "c:settings",
+      group: "Actions",
+      label: "Open settings",
+      keywords: "preferences theme terminal font notifications shortcuts agents update",
+      kind: "command",
+      icon: <Icon name="settings" size={16} />,
+      right: shortcutLabel("settings") ? <Kbd>{shortcutLabel("settings")}</Kbd> : undefined,
+      run: () => store.setSettingsOpen(true),
+    });
     for (const f of store.folders) {
       const path = tildify(f.path, store.home);
       if (defaultAgent) {
@@ -90,7 +101,7 @@ export function Palette() {
           label: `New ${defaultAgent.name} session in ${path}`,
           kind: "command",
           icon: <Icon name="plus" size={16} />,
-          right: <Kbd>⌘N</Kbd>,
+          right: shortcutLabel("newSession") ? <Kbd>{shortcutLabel("newSession")}</Kbd> : undefined,
           run: () => store.openNewSession({ folderId: f.id, agent: defaultAgent.agent }),
         });
       }
@@ -123,7 +134,7 @@ export function Palette() {
         icon: <Icon name="folder" size={16} />,
         right: <span className="mono faint small">{path}</span>,
         run: () => {
-          const first = store.sessions.find((s) => s.folderId === f.id);
+          const first = store.visibleSessions.find((s) => s.folderId === f.id);
           if (first) store.select(first.id, { view: "focus" });
           else store.openNewSession({ folderId: f.id });
         },
@@ -258,7 +269,7 @@ export function Palette() {
       <div className="palette-foot">
         <span>↑↓ move</span>
         <span>↵ open</span>
-        <span>⌘↵ open in split</span>
+        <span>{MOD_LABEL}↵ open in split</span>
         <span className="push">Type &gt; for commands, @ for folders</span>
       </div>
     </Dialog>

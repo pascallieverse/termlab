@@ -2,9 +2,9 @@
 //! keep running when the app window (or the whole app) is closed.
 //!
 //! Usage: `termlabd [--data-dir <dir>]`. Listens on `<data-dir>/termlabd.sock` for the app
-//! and on `<data-dir>/hook.sock` for `termlab-hook`. Exits on SIGTERM/SIGINT (saving every
-//! session's output first), on an app's `Shutdown` request, or after ten idle minutes with
-//! no sessions and no app connected.
+//! and on `<data-dir>/hook.sock` for `termlab-hook` (on Windows: named pipes derived from
+//! those paths). Exits on SIGTERM/SIGINT (saving every session's output first), on an app's
+//! `Shutdown` request, or after ten idle minutes with no sessions and no app connected.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,7 +61,7 @@ fn init_logging(dirs: &DataDirs) -> anyhow::Result<()> {
 
 async fn run(dirs: DataDirs) -> anyhow::Result<()> {
     let socket = dirs.daemon_socket();
-    if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+    if termlab_core::transport::connect(&socket).await.is_ok() {
         eprintln!("termlabd is already running ({})", socket.display());
         return Ok(());
     }
@@ -69,7 +69,10 @@ async fn run(dirs: DataDirs) -> anyhow::Result<()> {
     // `termlab-hook` ships next to this binary.
     let hook_binary = std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|d| d.join("termlab-hook")))
+        .and_then(|exe| {
+            let name = format!("termlab-hook{}", std::env::consts::EXE_SUFFIX);
+            exe.parent().map(|d| d.join(name))
+        })
         .filter(|p| p.exists());
     if hook_binary.is_none() {
         tracing::warn!(
@@ -100,9 +103,8 @@ async fn run(dirs: DataDirs) -> anyhow::Result<()> {
         });
     }
 
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
-        _ = sigterm.recv() => tracing::info!("SIGTERM"),
+        _ = terminated() => tracing::info!("SIGTERM"),
         _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT"),
         _ = server.shutdown.notified() => tracing::info!("shutdown requested by the app"),
         _ = idle_watch(server.clone()) => tracing::info!("idle with no sessions or clients; exiting"),
@@ -113,6 +115,20 @@ async fn run(dirs: DataDirs) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(dirs.hook_socket());
     tracing::info!("termlabd stopped");
     Ok(())
+}
+
+/// Resolves when the process is asked to stop (SIGTERM). Windows has no such signal: there
+/// the daemon stops on the app's request, on Ctrl-C, or when idle.
+async fn terminated() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+            sigterm.recv().await;
+            return;
+        }
+    }
+    std::future::pending::<()>().await;
 }
 
 async fn idle_watch(server: Arc<Server>) {

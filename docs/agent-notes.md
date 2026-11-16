@@ -112,6 +112,44 @@ These screens are test fixtures in `crates/termlab-core/src/status.rs`.
   first-party list prices.
 - Context window: current Claude models have 1M tokens (Haiku 4.5 has 200K).
 
+## Switching Claude Code to a sub-agent (verified live, 2.1.325)
+
+Once a session has background agents, Claude draws a list under its input box: `main` first,
+then the *running* agents in launch order. Finished agents drop out of the list. Rows show
+each agent's latest activity, not its description.
+
+```
+──────────────────────────────────── Alpha probe ─   ← label: the agent in view
+❯ Message @general-purpose…
+────────────────────────────────────────────────────
+  ↑/↓ to select · ctrl+x ctrl+k to stop all agents
+
+  ◯ main
+❯ ⏺ general-purpose  Alpha probe     8s · ↓ 44.7k tokens
+  ◯ general-purpose  Beta probe      7s · ↓ 44.4k tokens
+```
+
+- `⏺` marks the agent in view and `❯` marks the list's cursor.
+- ↓ on an empty input moves into the list. ↑/↓ move the cursor and Enter views that agent;
+  the list keeps focus. Esc goes back to the input and doesn't interrupt anything. Typing `x`
+  in the list stops an agent.
+- A long list scrolls, with `↑ N more` / `↓ N more` rows.
+
+Clicking a sub-agent in the sidebar (`viewSubagent`) presses one key at a time, waiting after
+each for the screen to show where the cursor went, so it can't overshoot. It then presses
+Enter, checks the label on the input box against the agent's description, and finishes with
+Esc. The label is the description even while the row shows activity.
+
+- **Which row it tries first:** a row still showing the description, then the agent's
+  position in Termlab's list. Agents start and finish all the time, so the two lists don't
+  always line up. When the label doesn't match, it tries the other rows. If none matches, it
+  puts back the agent that was in view.
+- **Clicking the session's own row** goes back to `main`.
+- **It refuses while a permission prompt is showing.** There, the arrow keys would move the
+  prompt's selection instead.
+- **Code:** the parser is `claude_agent_panel` in `adapter/claude.rs`, and the keys are sent
+  by `PanelDriver` in `service.rs`.
+
 ## Codex CLI
 
 - Model: `-m, --model`. Models listed in `~/.codex/models_cache.json` (non-hidden `slug`s) are
@@ -235,6 +273,74 @@ start resumes each one with the agent's own resume command, at its last terminal
 Claude background sessions are re-attached instead. Resuming only reopens the conversation and
 sends no prompt. Sessions whose agent never saved a conversation (no session id) stay ended,
 and the UI says why.
+
+## Agent updates: "Restart to update"
+
+An agent that is updated keeps running its old program in sessions that were already open.
+Claude Code says so itself in its terminal ("Update installed · Restart to update"); the other
+agents say nothing. Termlab shows a **Restart to update** button on such a session. It never
+looks online for new versions: it only compares what is installed with what the session runs.
+
+- **Sessions Termlab started (all agents):** at start, Termlab notes the real file behind the
+  agent's command (Claude Code's `~/.local/bin/claude` is a link into
+  `~/.local/share/claude/versions/<version>`, which its updater re-points; Homebrew and npm
+  installs are links too) and that file's modification time. Every 30 seconds it checks whether
+  the command now leads to another file, or to the same file replaced in place. The button stops
+  the process and resumes the same conversation with the agent's resume command.
+- **Claude background sessions Termlab is attached to:** the attach command is only a window
+  onto a session that Claude's own background service runs, so the program to compare is the
+  worker's. `claude agents --json` (2.1.325) gives each session's `pid`; the file that process
+  runs comes from `/proc/<pid>/exe` on Linux and `lsof -a -p <pid> -d txt -Fn` on macOS (first
+  `n…` line). Seen live on 16 Nov 2026: workers started on 12 and 13 Nov still ran
+  `versions/2.1.322` and `versions/2.1.323` while 2.1.325 was installed.
+- **`claude respawn <id>`** (2.1.325; help text: "Restart a background session (or all of them)
+  so it picks up the current Claude binary") is what the button runs for those. Verified live on
+  a throwaway background session: it prints `respawned <id>`, exits 0 after about 1.4 s, the
+  session keeps its session id and conversation and gets a new `pid` and `startedAt`, and a
+  client attached with `claude attach` exits with "Session <id> has exited — run `claude attach
+  <id>` to resume it". Termlab then attaches again.
+- Not verified live: a restart-to-update for Codex, Vibe and Antigravity (none of them had an
+  update installed under a running session); they use the same check and the same resume path
+  as any restart.
+
+## Platforms
+
+| | Status |
+|---|---|
+| macOS, Apple Silicon | Where everything in this file was verified. Intel Macs are not supported. |
+| Linux, x86-64 | The daemon and `termlab-hook` compile and link (cross-compiled from macOS). Not started on a Linux machine yet; the app itself is first compiled by CI. |
+| Windows, x86-64 | The daemon, `termlab-hook` and the app compile (cross-compiled from macOS). Not started on a Windows machine yet, and no agent flag in this file has been checked there. |
+
+What differs outside macOS, all unverified on a real machine:
+
+- **Local connections.** tokio has no Unix sockets on Windows, so the app⇄daemon and
+  hook→daemon connections are named pipes there (`crates/termlab-core/src/transport.rs`).
+  The pipe name is derived from the socket's path. A named pipe's default permissions let
+  other accounts on the same machine connect read-only, so on Windows the daemon sends
+  nothing on a connection until the client has sent a request.
+- **Environment.** Linux asks the login shell for its environment as macOS does (`$SHELL`,
+  else `/bin/sh`). A Windows app inherits the user's environment, so it is used as it is;
+  variable names are upper-cased (`Path` → `PATH`) and the home folder is `USERPROFILE`.
+- **Claude Code hooks on Windows.** Its docs (code.claude.com/docs/en/hooks, read
+  2026-11-16) say a hook's `command` string runs through Git Bash, or PowerShell when Git
+  Bash isn't installed. One string can't be right for both, so on Windows Termlab writes
+  hooks in the documented exec form (`"command": "<termlab-hook.exe>", "args": ["claude",
+  "<Event>"]`), which starts the program without a shell.
+- **Claude Code status line on Windows.** Same two shells, and no exec form. Termlab sets
+  its status line only when the path to `termlab-hook.exe` has no spaces (written with
+  forward slashes, which both shells read the same) and the user has none of their own;
+  otherwise theirs is left alone and plan limits come only from the usage request.
+- **Agents installed as `.cmd` scripts** (npm on Windows) are started through `cmd.exe /d
+  /c`. Arguments containing `& | < > ^ % !` are refused, because the command interpreter
+  would act on them.
+- **"Restart to update" for attached sessions** needs the worker's executable: `/proc` on
+  Linux, `lsof` on macOS, not looked up on Windows (the button doesn't appear there for
+  attached sessions).
+- **Stopping the daemon.** Windows has no SIGTERM: the daemon stops on the app's request or
+  when idle, and the installer ends it with `taskkill` because Windows can't replace a
+  running program (its sessions stop; resumable ones come back).
+- **Linux packages.** `.deb` and `.rpm` only. An AppImage is unmounted when the app exits,
+  which would take the daemon's own program away while sessions still run.
 
 ## Aider
 

@@ -4,7 +4,8 @@
 //! API keys). A macOS app started from Finder or the Dock does not inherit the user's shell
 //! environment, though — its PATH is just `/usr/bin:/bin:/usr/sbin:/sbin`, so `claude` in
 //! `~/.local/bin` would not be found. So we ask the user's login shell for its environment
-//! once at startup and use that.
+//! once at startup and use that. The same goes for a Linux desktop launcher. A Windows app
+//! does inherit the user's environment, so there it is used as it is.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -63,7 +64,7 @@ impl UserEnv {
     /// This process's own environment.
     pub fn from_current() -> Self {
         Self {
-            vars: std::env::vars().collect(),
+            vars: std::env::vars().map(|(k, v)| (var_name(k), v)).collect(),
         }
     }
 
@@ -85,10 +86,18 @@ impl UserEnv {
     /// shell can't be run or takes too long.
     pub fn capture_login_shell() -> Self {
         let current = Self::from_current();
+        if cfg!(windows) {
+            return current;
+        }
+        let default_shell = if cfg!(target_os = "macos") {
+            "/bin/zsh"
+        } else {
+            "/bin/sh"
+        };
         let shell = current
             .get("SHELL")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/bin/zsh"));
+            .unwrap_or_else(|| PathBuf::from(default_shell));
         match capture_from_shell(&shell, CAPTURE_TIMEOUT) {
             Ok(vars) if vars.contains_key("PATH") => {
                 tracing::info!(shell = %shell.display(), count = vars.len(), "captured login shell environment");
@@ -117,12 +126,17 @@ impl UserEnv {
         self.get("PATH").map(OsString::from)
     }
 
+    /// The user's home folder.
+    pub fn home(&self) -> Option<PathBuf> {
+        let name = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        self.get("HOME")
+            .or_else(|| self.get(name))
+            .map(PathBuf::from)
+    }
+
     /// Finds an executable on this environment's PATH.
     pub fn which(&self, program: &str) -> Option<PathBuf> {
-        let cwd = self
-            .get("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/"));
+        let cwd = self.home().unwrap_or_else(|| PathBuf::from("/"));
         which::which_in(program, self.path_var(), cwd).ok()
     }
 
@@ -165,6 +179,16 @@ impl UserEnv {
             env.insert(k.clone(), v.clone());
         }
         env
+    }
+}
+
+/// Windows variable names don't distinguish case (`Path`); they are kept in upper case so
+/// lookups by name work.
+fn var_name(name: String) -> String {
+    if cfg!(windows) {
+        name.to_uppercase()
+    } else {
+        name
     }
 }
 

@@ -1,4 +1,5 @@
-//! The protocol between the desktop app and `termlabd`, over a Unix socket.
+//! The protocol between the desktop app and `termlabd`, over a local connection (a Unix
+//! socket; a named pipe on Windows: see [`crate::transport`]).
 //!
 //! Frames: `u32` big-endian length of what follows, then a kind byte, then the payload.
 //! - kind 1, JSON: [`ClientMsg`] from the app, [`ServerMsg`] from the daemon.
@@ -18,7 +19,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -29,6 +29,7 @@ use crate::error::CoreError;
 use crate::model::{AgentId, ApprovalChoice, FolderId, PermissionPreset, SessionId, TermSize};
 use crate::pty::PtyEvent;
 use crate::service::{CoreEvent, StartRequest, Termlab};
+use crate::transport::{self, Conn};
 
 /// 2: discovery everywhere, import, external sessions and attach.
 pub const PROTOCOL_VERSION: u32 = 2;
@@ -132,6 +133,10 @@ pub enum Request {
     Stop {
         id: SessionId,
     },
+    /// Restart a background session the agent runs itself, onto its installed version.
+    Respawn {
+        id: SessionId,
+    },
     #[serde(rename_all = "camelCase")]
     StopIdle {
         folder_id: FolderId,
@@ -143,6 +148,11 @@ pub enum Request {
         id: SessionId,
         title: String,
     },
+    #[serde(rename_all = "camelCase")]
+    SetOnHold {
+        id: SessionId,
+        on_hold: bool,
+    },
     Details {
         id: SessionId,
     },
@@ -151,6 +161,11 @@ pub enum Request {
     },
     Timeline {
         id: SessionId,
+    },
+    /// Switch the agent's terminal to one of its sub-agents (none: the main conversation).
+    ViewSubagent {
+        id: SessionId,
+        subagent: Option<String>,
     },
     /// What one of the session's sub-agents did.
     SubagentTimeline {
@@ -281,11 +296,9 @@ impl Server {
 
     /// Accepts connections on `path` until the process exits.
     pub async fn serve(self: Arc<Self>, path: &Path) -> std::io::Result<()> {
-        let _ = std::fs::remove_file(path);
-        let listener = tokio::net::UnixListener::bind(path)?;
-        crate::service::restrict_permissions(path);
+        let mut listener = transport::Listener::bind(path)?;
         loop {
-            let (stream, _) = listener.accept().await?;
+            let stream = listener.accept().await?;
             let this = self.clone();
             tokio::spawn(async move {
                 this.clients.fetch_add(1, Ordering::SeqCst);
@@ -295,8 +308,8 @@ impl Server {
         }
     }
 
-    async fn handle(self: Arc<Self>, stream: UnixStream) {
-        let (mut reader, mut writer) = stream.into_split();
+    async fn handle(self: Arc<Self>, stream: Conn) {
+        let (mut reader, mut writer) = tokio::io::split(stream);
         let (tx, mut rx) = mpsc::channel::<(u8, Vec<u8>)>(1024);
 
         let writer_task = tokio::spawn(async move {
@@ -307,7 +320,7 @@ impl Server {
             }
         });
 
-        let events_task = {
+        let start_events = || {
             let tx = tx.clone();
             let mut events = self.tl.subscribe();
             tokio::spawn(async move {
@@ -323,11 +336,17 @@ impl Server {
                 }
             })
         };
+        // A Windows named pipe lets other accounts on the machine connect read-only. They
+        // can't send anything, so there nothing is sent until the client has spoken.
+        let mut events_task = (!cfg!(windows)).then(start_events);
 
         let mut attachments: HashMap<SessionId, JoinHandle<()>> = HashMap::new();
         while let Ok((kind, payload)) = read_frame(&mut reader).await {
             if kind != KIND_JSON {
                 continue;
+            }
+            if events_task.is_none() {
+                events_task = Some(start_events());
             }
             let Ok(ClientMsg { id, req }) = serde_json::from_slice::<ClientMsg>(&payload) else {
                 // Most likely a request from a newer app. Answer it so the caller doesn't wait.
@@ -336,7 +355,7 @@ impl Server {
                     .and_then(|v| v.get("id")?.as_u64())
                 {
                     let msg = "Termlab's background service is older than the app and doesn't \
-                               support this. Restart it from the banner once its sessions are done.";
+                               support this yet. Restart it from the banner at the top of the window.";
                     let _ = tx.send(json_frame(&reply_msg(id, Err(msg.into())))).await;
                 }
                 tracing::debug!("unsupported client message");
@@ -408,7 +427,9 @@ impl Server {
         for (_, t) in attachments {
             t.abort();
         }
-        events_task.abort();
+        if let Some(task) = events_task {
+            task.abort();
+        }
         drop(tx);
         let _ = writer_task.await;
     }
@@ -475,13 +496,16 @@ pub fn dispatch(tl: &Arc<Termlab>, req: Request) -> Result<Value, String> {
         Answer { id, choice } => to_value(tl.answer(id, choice)),
         Resize { id, cols, rows } => to_value(tl.resize(id, TermSize { cols, rows })),
         Stop { id } => to_value(tl.stop(id)),
+        Respawn { id } => to_value(tl.respawn(id)),
         StopIdle { folder_id } => to_value(tl.stop_idle(folder_id)),
         Delete { id } => to_value(tl.delete_session(id)),
         SetTitle { id, title } => to_value(tl.set_title(id, &title)),
+        SetOnHold { id, on_hold } => to_value(tl.set_on_hold(id, on_hold)),
         Details { id } => to_value(tl.details(id)),
         Diff { id } => to_value(tl.diff(id)),
         Timeline { id } => to_value(tl.timeline(id)),
         SubagentTimeline { id, subagent } => to_value(tl.subagent_timeline(id, &subagent)),
+        ViewSubagent { id, subagent } => to_value(tl.view_subagent(id, subagent.as_deref())),
         Discover {
             folder_id,
             everywhere,
@@ -596,8 +620,8 @@ pub struct Client {
 
 impl Client {
     pub async fn connect(path: &Path) -> std::io::Result<Arc<Self>> {
-        let stream = UnixStream::connect(path).await?;
-        let (mut reader, mut writer) = stream.into_split();
+        let stream = transport::connect(path).await?;
+        let (mut reader, mut writer) = tokio::io::split(stream);
         let (tx, mut rx) = mpsc::unbounded_channel::<(u8, Vec<u8>)>();
         let pending: Pending = Arc::default();
         let (events, _) = broadcast::channel(8192);

@@ -27,6 +27,7 @@ function session(p: Partial<Session> & Pick<Session, "id" | "folderId" | "agent"
     startCommit: "abc123",
     transcriptPath: null,
     notify: true,
+    onHold: false,
     origin: "termlab",
     live: true,
     preview: [],
@@ -42,6 +43,7 @@ const sessions: Session[] = [
   session({
     id: "s1", folderId: 1, agent: "claude", title: "Move invoice retries to a queue worker", status: "needs_you",
     color: "purple",
+    updateReady: true,
     subagents: [
       { id: "a1", name: "test-runner", description: "Run the billing test suite", model: "sonnet", running: true, startedAt: Date.now() - 190_000, lastActivityAt: Date.now() - 4_000 },
       { id: "a2", name: "Explore", description: "Find every caller of retryInvoice", model: "haiku", running: true, startedAt: Date.now() - 45_000, lastActivityAt: Date.now() - 1_000 },
@@ -88,6 +90,7 @@ const sessions: Session[] = [
   }),
   session({
     id: "s6", folderId: 3, agent: "codex", title: "Split prod and staging Terraform state", status: "idle",
+    updateReady: true,
     lastActivityAt: now - 60 * min, preview: ["• Proposal: 3 steps using terraform state mv", "Waiting for your next message."],
     contextPercent: 22,
   }),
@@ -134,7 +137,11 @@ export function install() {
         envFiles.set(a.cwd as string, a.content as string);
         return null;
       }
-      if (cmd === "daemon_status") return { connected: true, message: null };
+      if (cmd === "plugin:app|version") return "0.1.0";
+      if (cmd === "update_check") return { supported: true, currentVersion: "0.1.0", version: "0.2.0", notes: null };
+      if (cmd === "update_install") return new Promise((resolve) => setTimeout(() => resolve(null), 3000));
+      if (cmd === "daemon_status") return { connected: true, message: null, outdated: false };
+      if (cmd === "restart_daemon") return null;
       if (cmd === "attach_session") {
         const ch = a.onOutput as Channel<ArrayBuffer>;
         setTimeout(() => ch.onmessage(new TextEncoder().encode(SCREEN).buffer as ArrayBuffer), 50);
@@ -161,11 +168,18 @@ export function install() {
           return null;
         }
         case "listSessions": return sessions;
+        case "setOnHold": {
+          const s = sessions.find((s) => s.id === id);
+          if (!s) throw "Session not found";
+          s.onHold = req.params?.onHold as boolean;
+          return null;
+        }
         case "session": {
           const session = sessions.find((s) => s.id === id);
           if (!session) throw "Session not found";
           return { ...session };
         }
+        case "respawn": return null;
         case "stop":
         case "restart": {
           const session = sessions.find((s) => s.id === id);
@@ -173,6 +187,8 @@ export function install() {
           session.live = req.method === "restart";
           session.status = session.live ? "running" : "done";
           session.exitCode = session.live ? null : 0;
+          // A restarted session runs the installed version.
+          session.updateReady = false;
           return req.method === "restart" ? { ...session } : null;
         }
         case "agents": case "refreshAgents": return agents;
@@ -199,6 +215,7 @@ export function install() {
             note: "Not signed in. Start Antigravity once and sign in to connect.",
           },
         ];
+        case "viewSubagent": return null;
         case "subagentTimeline": return [
           { at: Date.now() - 180_000, kind: "prompt", text: "Run the billing test suite and report any failures." },
           { at: Date.now() - 170_000, kind: "tool", text: "$ npm test -- billing" },

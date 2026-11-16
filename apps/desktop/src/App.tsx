@@ -2,6 +2,7 @@ import { EnvDialog } from "./EnvDialog";
 import { UsageChip } from "./UsageChip";
 import { useEffect } from "react";
 import { formatCost } from "./agents";
+import { api } from "./api";
 import { BroadcastDialog, HandOffDialog } from "./HandOffDialog";
 import { Inspector } from "./Inspector";
 import { MissionControl } from "./MissionControl";
@@ -9,10 +10,14 @@ import { NewSessionDialog } from "./NewSessionDialog";
 import { Palette } from "./Palette";
 import { SessionPane } from "./SessionPane";
 import { Sidebar } from "./Sidebar";
-import { ConfirmDialog, RenameDialog, SettingsDialog, SubagentDialog } from "./SmallDialogs";
+import { ConfirmDialog, RenameDialog, SubagentDialog } from "./SmallDialogs";
+import { SettingsDialog } from "./SettingsDialog";
+import { UpdateBanner, startUpdateChecks } from "./updates";
 import { StoreProvider, useStore } from "./store";
 import { TerminalView } from "./TerminalView";
 import { Icon, Kbd, Logo, Monogram, StatusPill } from "./ui";
+import { shortcutForEvent } from "./keybindings";
+import { IS_MAC, getBindings, isRecordingShortcut, shortcutLabel, useBindings } from "./shortcuts";
 
 export function App() {
   return (
@@ -22,18 +27,48 @@ export function App() {
   );
 }
 
+/** Restarts an outdated background service; it asks first when agents are mid-turn. */
+function RestartServiceButton() {
+  const store = useStore();
+  const busy = store.sessions.filter((s) => s.live && s.status === "running");
+  const restart = () => void store.run(() => api.restartDaemon());
+  return (
+    <button
+      className="btn small"
+      onClick={() =>
+        busy.length === 0
+          ? restart()
+          : store.confirm({
+              title: "Restart the background service?",
+              body: `${busy.length} session${busy.length === 1 ? " is" : "s are"} working right now (${busy
+                .map((s) => s.title)
+                .slice(0, 3)
+                .join(", ")}${busy.length > 3 ? ", …" : ""}). Every session is reopened with its conversation after the restart, but work in progress, including running sub-agents, stops.`,
+              action: "Restart now",
+              onConfirm: restart,
+            })
+      }
+    >
+      Restart service
+    </button>
+  );
+}
+
 function Shell() {
   const store = useStore();
-  const selected = store.sessions.find((s) => s.id === store.selectedId) ?? null;
-  const split = store.sessions.find((s) => s.id === store.splitId) ?? null;
+  const selected = store.visibleSessions.find((s) => s.id === store.selectedId) ?? null;
+  const split = store.visibleSessions.find((s) => s.id === store.splitId) ?? null;
   useShortcuts();
+  useEffect(startUpdateChecks, []);
 
   return (
     <div className="app">
       <Header />
+      <UpdateBanner />
       {store.daemon.message && (
         <div role="status" className="banner daemon">
-          {store.daemon.message}
+          <span>{store.daemon.message}</span>
+          {store.daemon.outdated && <RestartServiceButton />}
         </div>
       )}
       <div className="workspace">
@@ -75,8 +110,9 @@ function Shell() {
 
 function Header() {
   const store = useStore();
-  const running = store.sessions.filter((s) => s.status === "running").length;
-  const needs = store.sessions.filter((s) => s.status === "needs_you").length;
+  const bindings = useBindings();
+  const running = store.sessions.filter((s) => !s.onHold && s.status === "running").length;
+  const needs = store.sessions.filter((s) => !s.onHold && s.status === "needs_you").length;
   const installed = (store.agents ?? []).filter((a) => a.installed).length;
   const startOfDay = new Date().setHours(0, 0, 0, 0);
   // Spend is shown only for API-key sessions; subscription sessions have no per-session cost.
@@ -112,7 +148,8 @@ function Header() {
       </div>
       <div className="spacer" />
       <button className="btn search-btn" onClick={() => store.setPaletteOpen(true)}>
-        <Icon name="search" /> <span className="search-label">Search or run a command</span> <Kbd>⌘K</Kbd>
+        <Icon name="search" /> <span className="search-label">Search or run a command</span>{" "}
+        {shortcutLabel("palette", bindings) && <Kbd>{shortcutLabel("palette", bindings)}</Kbd>}
       </button>
       <button className="btn primary" onClick={() => store.openNewSession()}>
         <Icon name="plus" /> New session
@@ -146,7 +183,7 @@ function SplitPane({ id }: { id: string }) {
         sessionId={s.id}
         agent={s.agent}
         live={s.live}
-        fontSize={12}
+        compact
         autoFocus={false}
       />
     </section>
@@ -155,6 +192,21 @@ function SplitPane({ id }: { id: string }) {
 
 function Empty() {
   const store = useStore();
+  const bindings = useBindings();
+  if (store.sessionFilter === "on_hold") {
+    const hasHeldSessions = store.visibleSessions.length > 0;
+    return (
+      <div className="empty">
+        <Logo />
+        <h2>{hasHeldSessions ? "No session selected" : "No sessions on hold"}</h2>
+        <p className="muted">
+          {hasHeldSessions
+            ? "Pick an on-hold session on the left."
+            : "Sessions you put on hold will appear here."}
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="empty">
       <Logo />
@@ -171,7 +223,7 @@ function Empty() {
       )}
       <div className="empty-actions">
         <button className="btn primary tall" onClick={() => store.openNewSession()}>
-          <Icon name="plus" /> New session <span className="mono kbd-hint">⌘N</span>
+          <Icon name="plus" /> New session <span className="mono kbd-hint">{shortcutLabel("newSession", bindings)}</span>
         </button>
         <button className="btn tall" onClick={() => store.openNewSession({ tab: "resume", everywhere: true })}>
           <Icon name="refresh" /> Load sessions from your agents…
@@ -201,35 +253,41 @@ function useShortcuts() {
   const store = useStore();
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      const mod = e.metaKey || e.ctrlKey;
-      if (!mod) return;
-      const k = e.key.toLowerCase();
-      if (k === "k") {
-        e.preventDefault();
-        store.setPaletteOpen(!store.paletteOpen);
-      } else if (k === "n" && !e.shiftKey) {
-        e.preventDefault();
-        store.openNewSession();
-      } else if (k === "h" && e.shiftKey && store.selectedId) {
-        e.preventDefault();
-        store.setHandOffFor(store.selectedId);
-      } else if (k === "d" && !e.shiftKey && store.selectedId) {
-        e.preventDefault();
-        if (store.splitId) store.setSplit(null);
-        else {
-          const other = store.sessions.find((s) => s.id !== store.selectedId && s.live) ??
-            store.sessions.find((s) => s.id !== store.selectedId);
-          if (other) store.setSplit(other.id);
-        }
-      } else if (k === "i" && !e.shiftKey) {
-        e.preventDefault();
-        store.toggleInspector();
-      } else if (k === "1") {
-        e.preventDefault();
-        store.setView("focus");
-      } else if (k === "2") {
-        e.preventDefault();
-        store.setView("mission");
+      if (e.repeat || e.isComposing || isRecordingShortcut()) return;
+      const id = shortcutForEvent(e, getBindings(), IS_MAC);
+      if (!id) return;
+      if ((id === "split" || id === "handOff") && !store.selectedId) return;
+      e.preventDefault();
+      switch (id) {
+        case "palette":
+          store.setPaletteOpen(!store.paletteOpen);
+          break;
+        case "newSession":
+          store.openNewSession();
+          break;
+        case "settings":
+          store.setSettingsOpen(!store.settingsOpen);
+          break;
+        case "focusView":
+          store.setView("focus");
+          break;
+        case "missionView":
+          store.setView("mission");
+          break;
+        case "inspector":
+          store.toggleInspector();
+          break;
+        case "handOff":
+          store.setHandOffFor(store.selectedId);
+          break;
+        case "split":
+          if (store.splitId) store.setSplit(null);
+          else {
+            const other = store.visibleSessions.find((s) => s.id !== store.selectedId && s.live) ??
+              store.visibleSessions.find((s) => s.id !== store.selectedId);
+            if (other) store.setSplit(other.id);
+          }
+          break;
       }
     }
     window.addEventListener("keydown", onKey, true);

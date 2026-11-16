@@ -4,6 +4,7 @@
 mod commands;
 mod daemon;
 mod project_env;
+mod updates;
 mod ytmusic;
 
 use std::path::PathBuf;
@@ -28,6 +29,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            updates::setup(app)?;
             let dirs = DataDirs::for_user()?;
             std::fs::create_dir_all(&dirs.root)?;
             tracing::info!(data_dir = %dirs.root.display(), "starting Termlab");
@@ -46,11 +48,14 @@ pub fn run() {
             commands::attach_session,
             commands::detach_session,
             commands::daemon_status,
+            commands::restart_daemon,
             commands::open_in_terminal,
             commands::youtube_live_video,
             commands::open_external,
             commands::system_volume,
             commands::set_system_volume,
+            updates::update_check,
+            updates::update_install,
             ytmusic::youtube_music_dock,
             ytmusic::youtube_music_hide,
             ytmusic::youtube_music_navigate,

@@ -7,6 +7,7 @@ import {
   type Discovered,
   type ExternalSession,
   type PermissionPreset,
+  type Session,
   type StartRequest,
 } from "./api";
 import { AGENTS, PERMISSIONS, defaultPermission, tildify, whenText } from "./agents";
@@ -14,6 +15,7 @@ import { Dialog } from "./Dialog";
 import { FolderPicker } from "./FolderPicker";
 import { useStore } from "./store";
 import { Icon, Monogram } from "./ui";
+import { MOD_LABEL } from "./shortcuts";
 
 const CUSTOM = "__custom__";
 
@@ -113,7 +115,7 @@ function StartNew() {
     setStarting(false);
     if (s) {
       store.closeNewSession();
-      store.select(s.id, { view: "focus", tab: "terminal" });
+      store.show(s);
     }
   }
 
@@ -226,7 +228,7 @@ function StartNew() {
           Cancel
         </button>
         <button className="btn primary tall" disabled={!request || starting} onClick={() => void start()}>
-          Start session <span className="mono kbd-hint">⌘↵</span>
+          Start session <span className="mono kbd-hint">{MOD_LABEL}↵</span>
         </button>
       </div>
     </>
@@ -284,6 +286,12 @@ function ResumeTab() {
     store.select(id, { view: "focus", tab: "terminal" });
   }
 
+  /** A session that was just started: the list may not know it yet. */
+  function openStarted(s: Session) {
+    store.closeNewSession();
+    store.show(s);
+  }
+
   async function doImport(items: Discovered[]) {
     if (items.length === 0) return;
     setBusy(true);
@@ -325,17 +333,17 @@ function ResumeTab() {
         mode: { kind: "resume", agentSessionId: d.agentSessionId },
       }),
     );
-    if (s) openSession(s.id);
+    if (s) openStarted(s);
   }
 
   async function restart(id: string) {
     const s = await store.run(() => api.restart(id));
-    if (s) openSession(s.id);
+    if (s) openStarted(s);
   }
 
   async function attach(e: ExternalSession) {
     const s = await store.run(() => api.attachExternal(e.agent, e.agentSessionId));
-    if (s) openSession(s.id);
+    if (s) openStarted(s);
   }
 
   const elsewhere = (external ?? []).filter(

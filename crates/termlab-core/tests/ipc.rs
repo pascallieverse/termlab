@@ -51,6 +51,7 @@ impl AgentAdapter for FakeAdapter {
             env: vec![],
             cwd: req.cwd.clone(),
             agent_session_id: None,
+            worker_pid: None,
         }
     }
 }
@@ -69,7 +70,7 @@ async fn start_server(root: &Path) -> (Arc<Termlab>, PathBuf) {
     tokio::spawn(async move { server.serve(&path).await });
     // Wait for the socket to accept.
     timeout(WAIT, async {
-        while tokio::net::UnixStream::connect(&socket).await.is_err() {
+        while termlab_core::transport::connect(&socket).await.is_err() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -153,6 +154,32 @@ async fn app_and_daemon_round_trip_and_reconnect() {
         .await
         .unwrap();
     let id = view.record.id;
+
+    // Holding is persisted and broadcast to all viewers without stopping the process.
+    assert!(!view.record.on_hold);
+    for on_hold in [true, false] {
+        let wire =
+            serde_json::json!({ "method": "setOnHold", "params": { "id": id, "onHold": on_hold } });
+        let request: Request = serde_json::from_value(wire).unwrap();
+        client.call(request).await.unwrap();
+        timeout(WAIT, async {
+            loop {
+                if let Ok(ClientEvent::Core(CoreEvent::SessionUpdated { session })) =
+                    events.recv().await
+                    && session.record.id == id
+                    && session.record.on_hold == on_hold
+                {
+                    assert!(session.live);
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let current: SessionView = client.call_as(Request::Session { id }).await.unwrap();
+        assert_eq!(current.record.on_hold, on_hold);
+        assert!(current.live);
+    }
 
     // Errors come back as messages, not disconnects.
     let err = client

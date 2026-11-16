@@ -2,20 +2,20 @@ import { useProjectOrder } from "./useProjectOrder";
 import { useEffect, useMemo, useRef, useState, type ReactNode, type MouseEvent as ReactMouseEvent } from "react";
 import { TruncatedText } from "./TruncatedText";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { Folder, Session, SubAgent } from "./api";
+import { api, errorText, type Folder, type Session, type SubAgent } from "./api";
 import { AGENTS, needsAttention, relativeTime, sessionColor, tildify } from "./agents";
 import { AnimeCard } from "./AnimeCard";
 import { MusicCard } from "./MusicCard";
 import { useContextMenu } from "./ContextMenu";
 import { folderMenu, sessionMenu } from "./sessionMenu";
 import { useStore } from "./store";
+import { matchesSessionFilter, type SessionFilter } from "./sessionFilters";
 import { Dot, Icon, Monogram, StatusText } from "./ui";
+import { shortcutHint } from "./shortcuts";
 
 /** Folder groups show this many sessions until expanded. */
 const GROUP_PREVIEW = 8;
 const COLLAPSED_KEY = "termlab.sidebar.collapsed";
-
-type Filter = "all" | "attention" | "running";
 
 /** Collapsed folders are a per-viewer convenience, kept in localStorage. */
 function loadCollapsed(): Set<number> {
@@ -40,20 +40,21 @@ export function Sidebar() {
   const order = useProjectOrder(folders, store.moveFolder);
   const menu = useContextMenu();
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<Filter>("all");
+  const { sessionFilter: filter, setSessionFilter: setFilter } = store;
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [collapsed, setCollapsed] = useState<Set<number>>(loadCollapsed);
 
-  const counts: Record<Filter, number> = {
-    all: sessions.length,
-    attention: sessions.filter(needsAttention).length,
-    running: sessions.filter((s) => s.status === "running").length,
+  const counts: Record<SessionFilter, number> = {
+    all: sessions.filter((s) => matchesSessionFilter(s, "all")).length,
+    attention: sessions.filter((s) => matchesSessionFilter(s, "attention")).length,
+    running: sessions.filter((s) => matchesSessionFilter(s, "running")).length,
+    on_hold: sessions.filter((s) => matchesSessionFilter(s, "on_hold")).length,
   };
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
     const match = (s: Session) =>
-      (filter === "all" || (filter === "attention" ? needsAttention(s) : s.status === "running")) &&
+      matchesSessionFilter(s, filter) &&
       (!q ||
         s.title.toLowerCase().includes(q) ||
         AGENTS[s.agent].name.toLowerCase().includes(q) ||
@@ -132,19 +133,21 @@ export function Sidebar() {
               ["all", "All"],
               ["attention", "Attention"],
               ["running", "Running"],
-            ] as [Filter, string][]
+              ["on_hold", "On hold"],
+            ] as [SessionFilter, string][]
           ).map(([key, label]) => (
             <button
               key={key}
+              aria-label={`${label}, ${counts[key]} sessions`}
               aria-pressed={filter === key}
               className={filter === key ? "on" : ""}
               onClick={() => setFilter(key)}
               title={key === "attention" ? "Needs you, or ended with an error" : undefined}
             >
               {label}
-              <span className={`filter-count${key === "attention" && counts.attention > 0 ? " hot" : ""}`}>
+              {counts[key] > 0 && <span aria-hidden="true" className={`filter-count${key === "attention" ? " hot" : ""}`}>
                 {counts[key]}
-              </span>
+              </span>}
             </button>
           ))}
         </div>
@@ -174,7 +177,7 @@ export function Sidebar() {
           <button
             className="icon-btn small"
             aria-label="New session"
-            title="New session (⌘N)"
+            title={`New session${shortcutHint("newSession")}`}
             onClick={() => store.openNewSession()}
           >
             <Icon name="plus" />
@@ -221,12 +224,12 @@ export function Sidebar() {
                       onMenu={(e) => menu.open(e, `${s.title} actions`, sessionMenu(store, s))}
                       onSubagentMenu={(e, a) => menu.open(e, `${a.name} actions`, [
                         {
-                          label: "Open parent terminal",
-                          onSelect: () => {
-                            store.setSubagentView(null);
-                            store.select(s.id, { view: "focus", tab: "terminal" });
-                          },
+                          label: "Open in terminal",
+                          onSelect: () => openSubagentTerminal(store, s, a.id),
                         },
+                        ...(s.agent === "claude"
+                          ? [{ label: "Back to main conversation", onSelect: () => openSubagentTerminal(store, s, null) }]
+                          : []),
                         {
                           label: "View sub-agent activity…",
                           onSelect: () => store.setSubagentView({ sessionId: s.id, subagentId: a.id }),
@@ -248,7 +251,11 @@ export function Sidebar() {
             </div>
           );
         })}
-        {filtering && groups.every((g) => g.sessions.length === 0) && <p className="sidebar-note">No sessions match.</p>}
+        {filtering && groups.every((g) => g.sessions.length === 0) && (
+          <p className="sidebar-note">
+            {filter === "on_hold" && !query.trim() ? "No sessions on hold." : "No sessions match."}
+          </p>
+        )}
       </div>
       <AnimeCard />
       <MusicCard />
@@ -308,6 +315,17 @@ function FolderHead({
   );
 }
 
+/**
+ * Opens the session's terminal; for Claude Code, also switches it to the sub-agent's own view
+ * (`null`: back to the main conversation), the way picking it in Claude's agent list would.
+ */
+function openSubagentTerminal(store: ReturnType<typeof useStore>, s: Session, subagentId: string | null) {
+  store.setSubagentView(null);
+  store.select(s.id, { view: "focus", tab: "terminal" });
+  if (s.agent !== "claude" || !s.live) return;
+  api.viewSubagent(s.id, subagentId).catch((e: unknown) => store.toast(errorText(e)));
+}
+
 function SessionRow({ session: s, onMenu, onSubagentMenu }: {
   session: Session;
   onMenu(e: ReactMouseEvent): void;
@@ -331,7 +349,13 @@ function SessionRow({ session: s, onMenu, onSubagentMenu }: {
       style={tint.style}
       aria-current={selected ? "true" : undefined}
       aria-haspopup="menu"
-      onClick={() => store.select(s.id, { view: "focus" })}
+      onClick={() => {
+        // The session's own row stands for its main conversation, next to its sub-agents'.
+        store.select(s.id, { view: "focus" });
+        if (subagents.length > 0 && s.agent === "claude") {
+          api.viewSubagent(s.id, null).catch((e: unknown) => store.toast(errorText(e)));
+        }
+      }}
       onContextMenu={onMenu}
     >
       <Monogram agent={s.agent} size={24} />
@@ -351,11 +375,8 @@ function SessionRow({ session: s, onMenu, onSubagentMenu }: {
             <button
               className="subagent running"
               aria-haspopup="menu"
-              title={`Open ${s.title}'s terminal · Right-click for sub-agent activity`}
-              onClick={() => {
-                store.setSubagentView(null);
-                store.select(s.id, { view: "focus", tab: "terminal" });
-              }}
+              title={`Open in ${s.title}'s terminal · Right-click for sub-agent activity`}
+              onClick={() => openSubagentTerminal(store, s, a.id)}
               onContextMenu={(e) => onSubagentMenu(e, a)}
             >
               <span className="subagent-dot" aria-hidden="true" />

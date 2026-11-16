@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "cargo build -p termlabd -p termlab-hook && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "cargo build --release -p termlabd -p termlab-hook && npm run build",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -26,7 +26,7 @@
     }
   },
   "bundle": {
-    "active": true,
+    "active": false,
     "targets": "all",
     "category": "DeveloperTool",
     "icon": [
@@ -37,10 +37,6 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "files": {
-        "MacOS/termlabd": "../../../target/release/termlabd",
-        "MacOS/termlab-hook": "../../../target/release/termlab-hook"
-      },
       "minimumSystemVersion": "12.0"
     }
   }

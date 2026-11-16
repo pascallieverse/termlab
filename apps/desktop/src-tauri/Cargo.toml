@@ -23,6 +23,7 @@ termlab-core = { path = "../../../crates/termlab-core" }
 tokio = { version = "1.54.1", features = ["sync", "time", "macros", "rt", "process"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tauri-plugin-updater = "2"
 
 [lints]
 workspace = true

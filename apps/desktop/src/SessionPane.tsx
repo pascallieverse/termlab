@@ -7,6 +7,7 @@ import { TimelineView } from "./TimelineView";
 import { useStore, type Tab } from "./store";
 import { Icon, Monogram, StatusPill } from "./ui";
 import { useDetails } from "./useDetails";
+import { shortcutHint } from "./shortcuts";
 
 /** The selected session: header with tabs, terminal (or diff/timeline), approval bar, composer. */
 export function SessionPane({ session: s }: { session: Session }) {
@@ -14,6 +15,8 @@ export function SessionPane({ session: s }: { session: Session }) {
   const folder = store.folderOf(s);
   const details = useDetails(s.id, s.status);
   const agent = AGENTS[s.agent];
+  // From the agent itself, not the session's details: those load a moment after switching.
+  const canResume = store.agents?.find((a) => a.agent === s.agent)?.canResume ?? false;
 
   return (
     <section className="session-pane" aria-label={s.title}>
@@ -35,18 +38,26 @@ export function SessionPane({ session: s }: { session: Session }) {
         </div>
         <StatusPill session={s} />
         <div className="spacer" />
+        {s.live && s.updateReady && !!s.agentSessionId && canResume && <UpdateButton session={s} />}
         <Tabs current={store.tab} onChange={store.setTab} />
         <button
           className={`icon-btn${store.inspectorOpen ? " on" : ""}`}
           aria-label="Session details"
           aria-pressed={store.inspectorOpen}
-          title={`${store.inspectorOpen ? "Hide" : "Show"} session details (⌘I)`}
+          title={`${store.inspectorOpen ? "Hide" : "Show"} session details${shortcutHint("inspector")}`}
           onClick={store.toggleInspector}
         >
           <Icon name="panel" size={16} />
         </button>
       </div>
 
+      {s.onHold && (
+        <div role="status" className="banner muted">
+          <span>On hold{s.live ? " · The process is still running." : ""}</span>
+          <div className="spacer" />
+          <button className="btn" onClick={() => void store.setOnHold(s.id, false)}>Take off hold</button>
+        </div>
+      )}
       {s.apiKeyVars.length > 0 && (
         <div role="status" className="banner warn">
           <Icon name="warning" /> This session is billed to an API key ({s.apiKeyVars.join(", ")} is set in
@@ -72,6 +83,41 @@ export function SessionPane({ session: s }: { session: Session }) {
         <div className="composer-hint faint mono">{tildify(folder.path, store.home)}</div>
       )}
     </section>
+  );
+}
+
+/**
+ * A newer version of the agent was installed while this session kept running the older one.
+ * Restarting the session (on the same conversation) is what puts it on the new version.
+ */
+function UpdateButton({ session: s }: { session: Session }) {
+  const store = useStore();
+  const name = AGENTS[s.agent].name;
+  const restarting = store.restarting.has(s.id);
+  const busy = s.status === "running" || s.status === "needs_you";
+
+  function restart() {
+    if (!busy) return void store.restartSession(s.id);
+    store.confirm({
+      title: `Restart ${name} now?`,
+      body:
+        s.status === "running"
+          ? `${name} is working. Restarting interrupts that; the conversation continues on the new version.`
+          : `${name} is waiting for your answer. Restarting drops that question; the conversation continues on the new version.`,
+      action: "Restart",
+      onConfirm: () => void store.restartSession(s.id),
+    });
+  }
+
+  return (
+    <button
+      className="btn small amber-outline update-btn"
+      disabled={restarting}
+      title={`A newer ${name} is installed; this session still runs the older one. Restarting continues the same conversation on the new version.`}
+      onClick={restart}
+    >
+      <Icon name="refresh" /> {restarting ? "Restarting…" : "Restart to update"}
+    </button>
   );
 }
 
