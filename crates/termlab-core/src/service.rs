@@ -931,15 +931,20 @@ impl Termlab {
             SessionStatus::Error
         };
         tracing::info!(session = %id, code = info.code, ?status, "session exited");
-        if let Err(e) = self.db().set_exited(id, status, Some(info.code), now_ms()) {
-            tracing::warn!(session = %id, error = %e, "could not record exit");
+        {
+            // Under the live lock: `evaluate` only writes a status while the session is in
+            // `live`, so a status worked out just before the exit can't overwrite this one.
+            let mut live = self.live.write().expect("live lock");
+            if let Err(e) = self.db().set_exited(id, status, Some(info.code), now_ms()) {
+                tracing::warn!(session = %id, error = %e, "could not record exit");
+            }
+            live.remove(&id);
         }
         // Keep the last usage figures for the finished session's view.
         if let Some(m) = self.meta.lock().expect("meta lock").get_mut(&id) {
             m.approval = None;
             m.hook_status = None;
         }
-        self.live.write().expect("live lock").remove(&id);
         self.emit_session(id);
     }
 
@@ -2123,7 +2128,12 @@ impl Termlab {
             }
         }
         if let Some(s) = new_status {
-            let _ = self.db().set_status(id, s, now);
+            // Only while it still runs: once `on_exit` has recorded how it ended, a late
+            // update from this pass would turn a stopped session back into Idle or Running.
+            let live = self.live.read().expect("live lock");
+            if live.contains_key(&id) {
+                let _ = self.db().set_status(id, s, now);
+            }
         }
         if changed {
             self.emit_session(id);
