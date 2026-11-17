@@ -52,26 +52,33 @@ Installing downloads the package, checks its signature, replaces the app and sta
 again. Sessions keep running (on Windows the installer has to stop the background service;
 resumable sessions reopen).
 
-This is switched off until the update signing key exists. To switch it on, once:
+This is switched on since 0.2.2. The update signing key was set up once (2026-11-17):
 
-1. Create the key. It asks for a password:
-   `cd apps/desktop && npm run tauri signer generate -- -w ~/.tauri/termlab.key`
-2. Put the public key it prints (also in `~/.tauri/termlab.key.pub`) into `pubkey` in
-   `apps/desktop/src-tauri/updater.conf.json`, and commit that.
-3. Add two repository secrets: `TAURI_SIGNING_PRIVATE_KEY` (the contents of
-   `~/.tauri/termlab.key`) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+1. The key was created with
+   `cd apps/desktop && npm run tauri signer generate -- -w ~/.tauri/termlab.key`. The
+   private key is `~/.tauri/termlab.key` on the maintainer's Mac; its password is in the
+   macOS Keychain as "Termlab update signing key".
+2. Its public key (`~/.tauri/termlab.key.pub`) is `pubkey` in
+   `apps/desktop/src-tauri/updater.conf.json`.
+3. Two repository secrets hold the private side: `TAURI_SIGNING_PRIVATE_KEY` (the contents
+   of `~/.tauri/termlab.key`) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 
-Keep the key file and its password somewhere safe. Installed copies only accept updates
-signed with it: if it is lost, they can't be updated any more and need a manual reinstall.
+Keep the key file and its password backed up somewhere safe. Installed copies only accept
+updates signed with it: if it is lost, they can't be updated any more and need a manual
+reinstall. To replace the key, repeat the three steps; every installed copy then needs one
+manual install of a build with the new public key.
 
-From the next release on, the workflow adds `updater.conf.json` to the build, signs the
-update packages and uploads `latest.json`, which is what installed copies read. A release
-only reaches them once its draft is published. Builds made before the key existed, and
-development builds, say "This build doesn't update itself".
+With the secrets set, the workflow adds `updater.conf.json` to the build, signs the update
+packages and uploads `latest.json`, which is what installed copies read. A release only
+reaches them once its draft is published. Builds from before 0.2.2, and development
+builds, say "This build doesn't update itself": install 0.2.2 or later by hand once.
 
 ## Not there yet
 
 - **The update flow has not been run end to end.** The notice and buttons were checked
-  against mocked data; a real download and install needs two published releases.
+  against mocked data; a real download and install needs two published releases signed
+  with the key (0.2.2 and the one after it).
 - **Windows code signing.**
-- The workflows have not run yet. The Linux and Windows builds in particular are untested.
+- GitHub's Apple Silicon runners are sometimes short: a macOS build can be cancelled with
+  "The job was not acquired by Runner". Re-run the failed job
+  (`gh run rerun <run id> --failed`).
