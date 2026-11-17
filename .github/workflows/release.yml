@@ -142,11 +142,12 @@ jobs:
           args: ${{ env.BUILD_CONFIG }} --target ${{ matrix.target }}
 
       # Permissions only survive updates when macOS identifies the app by its certificate
-      # ("certificate leaf"), not by the build's hash ("cdhash"), as with ad hoc signing.
+      # (`certificate root = H"…"`: a self-signed certificate is its own root), not by the
+      # build's hash (`cdhash H"…"`), as with ad hoc signing.
       - name: Check the signature (macOS)
         if: runner.os == 'macOS' && env.MAC_SIGNING != 'true' && env.MAC_SELF_SIGNING == 'true'
         run: |
           app="$(find target -maxdepth 6 -path '*/bundle/macos/Termlab.app' | head -n 1)"
           codesign --verify --deep --strict "$app"
           codesign -d -r - "$app" 2>&1 | tee "$RUNNER_TEMP/requirement.txt"
-          grep -q 'certificate leaf' "$RUNNER_TEMP/requirement.txt"
+          grep -Eq 'certificate (root|leaf) = H' "$RUNNER_TEMP/requirement.txt"
