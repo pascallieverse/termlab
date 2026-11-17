@@ -376,6 +376,7 @@ mod tests {
             model: Some("ignored".into()),
             permission: PermissionPreset::AutoEdit,
             first_message: Some("dark mode".into()),
+            agent_permission_mode: None,
             hooks: None,
         };
         assert_eq!(

@@ -50,10 +50,11 @@ impl ClaudeAdapter {
         if let Some(model) = req.model() {
             args.extend(["--model".into(), model.into()]);
         }
-        args.extend([
-            "--permission-mode".into(),
-            Self::permission_mode(req.permission).into(),
-        ]);
+        let mode = req
+            .agent_permission_mode
+            .as_deref()
+            .unwrap_or(Self::permission_mode(req.permission));
+        args.extend(["--permission-mode".into(), mode.into()]);
         if let Some(h) = &req.hooks {
             // A Termlab-owned settings file; ~/.claude/settings.json is never touched.
             args.extend([
@@ -70,6 +71,25 @@ impl ClaudeAdapter {
             }
             args.push(msg.into());
         }
+    }
+}
+
+/// The permission mode a Claude conversation was last in, from its transcript: Claude writes
+/// `{"type":"permission-mode","permissionMode":…}` when it changes and puts `permissionMode`
+/// on each prompt. `default` is the old name of `manual`. Only modes `--permission-mode`
+/// accepts are returned.
+pub fn claude_last_permission_mode(transcript: &Path) -> Option<String> {
+    const TAIL: u64 = 2 * 1024 * 1024;
+    let mode = |v: &Value| {
+        v.get("permissionMode")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    let found = super::last_json_line_where(transcript, TAIL, |v| mode(v).is_some())?;
+    match mode(&found)?.as_str() {
+        "default" | "manual" => Some("manual".into()),
+        m @ ("acceptEdits" | "auto" | "bypassPermissions" | "dontAsk" | "plan") => Some(m.into()),
+        _ => None,
     }
 }
 
@@ -714,6 +734,11 @@ impl AgentAdapter for ClaudeAdapter {
         Some(CommandSpec::new(req, args, Some(agent_session_id.into())))
     }
 
+    fn last_permission_mode(&self, id: &str, folder: &Path, env: &UserEnv) -> Option<String> {
+        let transcript = claude_project_dir(folder, env)?.join(format!("{id}.jsonl"));
+        claude_last_permission_mode(&transcript)
+    }
+
     /// `--resume <id> --fork-session` continues under a new id; the SessionStart hook
     /// reports it.
     fn fork(&self, agent_session_id: &str, req: &LaunchRequest) -> Option<CommandSpec> {
@@ -1241,6 +1266,7 @@ mod tests {
             model: Some("opus".into()),
             permission: PermissionPreset::AutoEdit,
             first_message: Some("fix the tests".into()),
+            agent_permission_mode: None,
             hooks: None,
         }
     }
@@ -1457,6 +1483,59 @@ mod tests {
         r.first_message = Some("-v explain".into());
         let spec = ClaudeAdapter.launch(&r);
         assert_eq!(&spec.args[spec.args.len() - 2..], ["--", "-v explain"]);
+    }
+
+    #[test]
+    fn resume_continues_in_the_conversations_last_permission_mode() {
+        let home = tempfile::tempdir().unwrap();
+        let env = UserEnv::from_vars([("HOME", home.path().to_str().unwrap())]);
+        let folder = Path::new("/w/ncd");
+        let dir = claude_project_dir(folder, &env).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        // Shapes from a Claude Code 2.1.325 transcript: started in bypass, resumed by
+        // Termlab in manual ("default"), then switched with Shift+Tab.
+        let lines = [
+            r#"{"type":"permission-mode","permissionMode":"bypassPermissions","sessionId":"abc"}"#,
+            r#"{"type":"user","permissionMode":"default","message":{"role":"user","content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":"ok"}}"#,
+            r#"{"type":"permission-mode","permissionMode":"auto","sessionId":"abc"}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":"working"}}"#,
+        ];
+        std::fs::write(dir.join("abc.jsonl"), lines.join("\n") + "\n").unwrap();
+        assert_eq!(
+            ClaudeAdapter
+                .last_permission_mode("abc", folder, &env)
+                .as_deref(),
+            Some("auto")
+        );
+        // "default" is passed on as its new name; unknown sessions and modes give nothing.
+        std::fs::write(dir.join("old.jsonl"), lines[1]).unwrap();
+        assert_eq!(
+            ClaudeAdapter
+                .last_permission_mode("old", folder, &env)
+                .as_deref(),
+            Some("manual")
+        );
+        assert_eq!(
+            ClaudeAdapter.last_permission_mode("none", folder, &env),
+            None
+        );
+        std::fs::write(dir.join("odd.jsonl"), r#"{"permissionMode":"--evil"}"#).unwrap();
+        assert_eq!(
+            ClaudeAdapter.last_permission_mode("odd", folder, &env),
+            None
+        );
+
+        // The resume command uses it over Termlab's own setting.
+        let mut r = req();
+        r.agent_permission_mode = Some("auto".into());
+        let spec = ClaudeAdapter.resume("abc", &r).unwrap();
+        let i = spec
+            .args
+            .iter()
+            .position(|a| a == "--permission-mode")
+            .unwrap();
+        assert_eq!(spec.args[i + 1], "auto");
     }
 
     #[test]

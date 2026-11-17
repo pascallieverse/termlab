@@ -633,6 +633,7 @@ impl Termlab {
             model: choice.model.filter(|m| !m.trim().is_empty()),
             permission: choice.permission,
             first_message: choice.first_message,
+            agent_permission_mode: None,
             hooks: if hooks { self.hook_setup() } else { None },
         })
     }
@@ -640,7 +641,7 @@ impl Termlab {
     fn command_for(&self, req: &StartRequest, id: SessionId, hooks: bool) -> Result<CommandSpec> {
         let adapter = self.adapter(req.agent)?;
         let folder = self.db().folder(req.folder_id)?;
-        let lr = self.launch_request(
+        let mut lr = self.launch_request(
             req.agent,
             &folder,
             LaunchChoice {
@@ -655,9 +656,15 @@ impl Termlab {
             || CoreError::InvalidInput(format!("{} can't do that", req.agent.display_name()));
         match &req.mode {
             StartMode::New => Ok(adapter.launch(&lr)),
-            StartMode::Resume { agent_session_id } => adapter
-                .resume(agent_session_id, &lr)
-                .ok_or_else(unsupported),
+            StartMode::Resume { agent_session_id } => {
+                // Continue in the mode the conversation was last in: it may have been changed
+                // inside the agent, and sessions imported from elsewhere have no mode here.
+                lr.agent_permission_mode =
+                    adapter.last_permission_mode(agent_session_id, &folder.path, &self.config.env);
+                adapter
+                    .resume(agent_session_id, &lr)
+                    .ok_or_else(unsupported)
+            }
             StartMode::Fork { agent_session_id } => {
                 adapter.fork(agent_session_id, &lr).ok_or_else(unsupported)
             }
@@ -1639,6 +1646,7 @@ impl Termlab {
                             model: None,
                             permission: PermissionPreset::AskFirst,
                             first_message: None,
+                            agent_permission_mode: None,
                             hooks: None,
                         },
                     )

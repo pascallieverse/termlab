@@ -128,6 +128,7 @@ mod tests {
             model: Some("gemini-3-pro".into()),
             permission: PermissionPreset::AskFirst,
             first_message: Some("upgrade react".into()),
+            agent_permission_mode: None,
             hooks: None,
         };
         assert_eq!(

@@ -80,6 +80,9 @@ pub struct LaunchRequest {
     pub model: Option<String>,
     pub permission: PermissionPreset,
     pub first_message: Option<String>,
+    /// The agent's own permission mode to continue in (a resumed conversation's last mode,
+    /// from the agent's files). Wins over `permission`, which can't express every mode.
+    pub agent_permission_mode: Option<String>,
     pub hooks: Option<HookSetup>,
 }
 
@@ -268,6 +271,17 @@ pub trait AgentAdapter: Send + Sync {
     fn launch(&self, req: &LaunchRequest) -> CommandSpec;
 
     fn resume(&self, _agent_session_id: &str, _req: &LaunchRequest) -> Option<CommandSpec> {
+        None
+    }
+
+    /// The permission mode a conversation was last in, as the agent's own flag value, so a
+    /// resume continues in it (including a mode changed inside the agent).
+    fn last_permission_mode(
+        &self,
+        _agent_session_id: &str,
+        _folder: &Path,
+        _env: &UserEnv,
+    ) -> Option<String> {
         None
     }
 
@@ -474,11 +488,19 @@ pub(crate) const SUBAGENT_QUIET_MS: Millis = 10 * 60 * 1000;
 
 /// The last complete JSON line of a JSONL file, reading only its tail.
 pub(crate) fn last_json_line(path: &Path) -> Option<serde_json::Value> {
+    last_json_line_where(path, 256 * 1024, |_| true)
+}
+
+/// The last JSON line within the final `tail` bytes of a file that satisfies `pred`.
+pub(crate) fn last_json_line_where(
+    path: &Path,
+    tail: u64,
+    pred: impl Fn(&serde_json::Value) -> bool,
+) -> Option<serde_json::Value> {
     use std::io::{Read, Seek, SeekFrom};
-    const TAIL: u64 = 256 * 1024;
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    let start = len.saturating_sub(TAIL);
+    let start = len.saturating_sub(tail);
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).ok()?;
@@ -492,7 +514,8 @@ pub(crate) fn last_json_line(path: &Path) -> Option<serde_json::Value> {
         .into_iter()
         .rev()
         .filter(|l| !l.trim().is_empty())
-        .find_map(|l| serde_json::from_str(l).ok())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .find(|v| pred(v))
 }
 
 pub(crate) fn mtime_ms(path: &Path) -> Millis {

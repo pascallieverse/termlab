@@ -93,6 +93,7 @@ mod tests {
             model: Some("ignored".into()),
             permission: PermissionPreset::FullAuto,
             first_message: Some("ignored".into()),
+            agent_permission_mode: None,
             hooks: None,
         });
         assert_eq!(spec.args, ["-l"]);

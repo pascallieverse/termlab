@@ -696,6 +696,7 @@ mod tests {
             model: Some("gpt-6-sol".into()),
             permission: PermissionPreset::AskFirst,
             first_message: Some("add idempotency keys".into()),
+            agent_permission_mode: None,
             hooks: Some(HookSetup {
                 binary: "/Apps/Term lab/termlab-hook".into(),
                 claude_settings: "/unused".into(),
