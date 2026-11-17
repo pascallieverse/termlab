@@ -4425,7 +4425,7 @@ dependencies = [
 
 [[package]]
 name = "termlab-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "directories",
@@ -4445,7 +4445,7 @@ dependencies = [
 
 [[package]]
 name = "termlab-desktop"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -4464,11 +4464,11 @@ dependencies = [
 
 [[package]]
 name = "termlab-hook"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "termlabd"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "tempfile",
