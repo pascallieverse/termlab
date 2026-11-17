@@ -5,6 +5,7 @@
 mod antigravity;
 mod claude;
 mod codex;
+mod shell;
 mod vibe;
 
 use std::io::Read;
@@ -22,6 +23,7 @@ pub use claude::{
     claude_user_status_line, encode_claude_path,
 };
 pub use codex::{CodexAdapter, codex_find_new_rollout, codex_plan_usage, codex_rollout_path};
+pub use shell::ShellAdapter;
 pub use vibe::VibeAdapter;
 
 pub(crate) use claude::user_prompt_text as claude_user_prompt;
@@ -380,6 +382,7 @@ pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(CodexAdapter),
         Box::new(VibeAdapter),
         Box::new(AntigravityAdapter),
+        Box::new(ShellAdapter),
     ]
 }
 

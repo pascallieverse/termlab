@@ -3,6 +3,7 @@ import type { AgentId } from "./api";
 
 // Small marks for each agent's maker, drawn here as simplified shapes in the spirit of each
 // brand's logo (Claude's burst, OpenAI's knot, Mistral's pixel M, Google's Gemini spark).
+// A plain terminal gets a prompt.
 // They identify whose agent a session runs; they are not the official artwork.
 
 const MISTRAL_ROWS: { color: string; cells: number[] }[] = [
@@ -41,6 +42,12 @@ export function AgentLogo({ agent, size = 14 }: { agent: AgentId; size?: number 
               <rect key={`${x}-${y}`} x={2 + x * 4} y={2 + y * 4} width="4.1" height="4.1" fill={row.color} />
             )),
           )}
+        </svg>
+      );
+    case "shell":
+      return (
+        <svg {...common} fill="none" stroke="#C9CED6" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M4 6l6 6-6 6M12 18h8" />
         </svg>
       );
     case "antigravity":

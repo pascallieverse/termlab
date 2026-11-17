@@ -23,11 +23,14 @@ const HOME: &str = "https://music.youtube.com/";
 /// Safari's own engine (WKWebView), so presenting it as Safari is accurate enough for that.
 const MOBILE_UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
 
-/// Runs in the docked page before its own scripts. Two adjustments, no access to Termlab:
+/// Runs in the docked page before its own scripts. Three adjustments, no access to Termlab:
 ///
 /// - The page always counts as visible. YouTube Music's mobile site pauses when its page
 ///   goes to the background (the card collapsed, the window covered or minimised); as a
 ///   music player docked in a desktop app, it should keep playing, as the desktop site does.
+/// - No browser right-click menu (Open Link in New Window, Download Image, Reload, …) except
+///   in text fields and on selected text. The page's own menus still open: they run first,
+///   and only the native one is cancelled.
 /// - No scrollbars (scrolling still works): they'd take a fair share of a view this small.
 ///   `scrollbar-width` is the standard property, which current WebKit obeys over
 ///   `::-webkit-scrollbar` wherever a page sets the standard ones; both are set, in the page
@@ -42,6 +45,14 @@ const PAGE_SETUP_JS: &str = r#"(() => {
       window.addEventListener(type, (e) => e.stopImmediatePropagation(), true);
     }
   } catch (e) {}
+
+  window.addEventListener("contextmenu", (e) => {
+    const t = e.target;
+    const field = t instanceof Element && (t.closest("input, textarea") || t.isContentEditable);
+    const sel = window.getSelection();
+    const selected = sel && !sel.isCollapsed && sel.toString().trim() !== "";
+    if (!field && !selected) e.preventDefault();
+  });
 
   const css = "*{scrollbar-width:none!important}::-webkit-scrollbar{display:none!important;width:0!important;height:0!important}";
   try {
@@ -175,6 +186,14 @@ pub async fn youtube_music_dock(app: AppHandle, rect: DockRect, zoom: f64) -> Cm
                     {
                         let _ = view.navigate(home);
                     }
+                })
+                // Links meant for a new tab (and "Open Link in New Window") go to the
+                // default browser; the docked view never opens windows of its own.
+                .on_new_window(|url, _| {
+                    if matches!(url.scheme(), "https" | "http") {
+                        open_in_browser(url.as_str());
+                    }
+                    tauri::webview::NewWindowResponse::Deny
                 })
                 .on_navigation(|url| {
                     if allowed_in_window(url) {

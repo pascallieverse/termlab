@@ -7,9 +7,10 @@ export const AGENTS: Record<AgentId, { name: string; mono: string; bg: string; f
   codex: { name: "Codex CLI", mono: "CX", bg: "#123026", fg: "#5FD3A8" },
   vibe: { name: "Mistral Vibe", mono: "MV", bg: "#3A2410", fg: "#FFA463" },
   antigravity: { name: "Antigravity", mono: "AG", bg: "#172744", fg: "#8DB6FF" },
+  shell: { name: "Terminal", mono: ">_", bg: "#24272D", fg: "#C9CED6" },
 };
 
-export const AGENT_ORDER: AgentId[] = ["claude", "codex", "vibe", "antigravity"];
+export const AGENT_ORDER: AgentId[] = ["claude", "codex", "vibe", "antigravity", "shell"];
 
 /** Status is always a coloured dot plus a text label. */
 export const STATUS: Record<SessionStatus, { label: string; color: string; text: string }> = {

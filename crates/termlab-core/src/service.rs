@@ -25,8 +25,8 @@ use crate::git::{self, ChangedFile};
 use crate::hooks::{self, HookMessage, MAX_MESSAGE_BYTES};
 use crate::model::{
     AgentId, Approval, ApprovalChoice, Billing, Folder, FolderId, Isolation, Millis,
-    PermissionPreset, PlanUsage, SESSION_COLORS, SessionId, SessionOrigin, SessionRecord,
-    SessionStatus, SessionView, SubAgent, TermSize, Usage, now_ms,
+    PermissionPreset, PlanUsage, PromptKind, SESSION_COLORS, SessionId, SessionOrigin,
+    SessionRecord, SessionStatus, SessionView, SubAgent, TermSize, Usage, now_ms,
 };
 use crate::pty::{Attachment, ExitInfo, PtyProcess, SpawnSpec};
 use crate::scrollback::{self, DEFAULT_SCROLLBACK_BYTES, Scrollback};
@@ -242,6 +242,8 @@ struct LiveMeta {
     hook_status: Option<SessionStatus>,
     hook_at: Millis,
     approval_detail: Option<String>,
+    /// The question a hook says the agent asked (Claude's AskUserQuestion).
+    hook_question: Option<String>,
     // Last values sent to the UI, to only emit changes.
     status: Option<SessionStatus>,
     preview: Vec<String>,
@@ -772,7 +774,8 @@ impl Termlab {
                 .filter(|t| !t.trim().is_empty())
                 .unwrap_or_else(|| default_title(req)),
             model: req.model.clone().filter(|m| !m.trim().is_empty()),
-            permission_mode: Some(req.permission),
+            // A terminal has no permission mode of its own.
+            permission_mode: (req.agent != AgentId::Shell).then_some(req.permission),
             isolation: Isolation::Checkout,
             agent_session_id: spec.agent_session_id.clone(),
             status: SessionStatus::Running,
@@ -817,29 +820,11 @@ impl Termlab {
             ));
         }
         let rec = self.record(id)?;
-        let agent_session_id = rec.agent_session_id.clone().ok_or_else(|| {
-            CoreError::InvalidInput(
-                "this session's agent id isn't known, so it can't be resumed".into(),
-            )
-        })?;
-        // An attached session is re-attached: the agent kept running it in the background.
-        // Anything else is resumed, unless the agent is running it somewhere right now.
-        let mode = if rec.origin == SessionOrigin::Attached {
-            let ext = self
-                .external_sessions()
-                .into_iter()
-                .find(|e| {
-                    e.running.agent == rec.agent && e.running.agent_session_id == agent_session_id
-                })
-                .ok_or_else(|| {
-                    CoreError::InvalidInput("that background session isn't running any more".into())
-                })?;
-            StartMode::Attach {
-                running: ext.running,
-            }
+        // A terminal has no conversation to resume: a fresh shell starts in its place.
+        let mode = if rec.agent == AgentId::Shell {
+            StartMode::New
         } else {
-            self.ensure_not_running_elsewhere(rec.agent, &agent_session_id)?;
-            StartMode::Resume { agent_session_id }
+            self.resume_mode(&rec)?
         };
         let req = StartRequest {
             folder_id: rec.folder_id,
@@ -862,6 +847,34 @@ impl Termlab {
         self.db().set_term_size(id, size)?;
         self.spawn(id, &spec, size, sb)?;
         self.session(id)
+    }
+
+    /// How `restart` continues an agent's session: re-attach or resume.
+    fn resume_mode(&self, rec: &SessionRecord) -> Result<StartMode> {
+        let agent_session_id = rec.agent_session_id.clone().ok_or_else(|| {
+            CoreError::InvalidInput(
+                "this session's agent id isn't known, so it can't be resumed".into(),
+            )
+        })?;
+        // An attached session is re-attached: the agent kept running it in the background.
+        // Anything else is resumed, unless the agent is running it somewhere right now.
+        Ok(if rec.origin == SessionOrigin::Attached {
+            let ext = self
+                .external_sessions()
+                .into_iter()
+                .find(|e| {
+                    e.running.agent == rec.agent && e.running.agent_session_id == agent_session_id
+                })
+                .ok_or_else(|| {
+                    CoreError::InvalidInput("that background session isn't running any more".into())
+                })?;
+            StartMode::Attach {
+                running: ext.running,
+            }
+        } else {
+            self.ensure_not_running_elsewhere(rec.agent, &agent_session_id)?;
+            StartMode::Resume { agent_session_id }
+        })
     }
 
     fn spawn(
@@ -1030,6 +1043,7 @@ impl Termlab {
         if let Some(m) = self.meta.lock().expect("meta lock").get_mut(&id) {
             m.hook_status = None;
             m.approval_detail = None;
+            m.hook_question = None;
         }
         Ok(())
     }
@@ -1049,8 +1063,8 @@ impl Termlab {
                 "only Claude Code lists its sub-agents in the terminal".into(),
             ));
         }
-        let (guess, description) = match subagent {
-            None => (0, None),
+        let (guess, name, description) = match subagent {
+            None => (0, String::new(), None),
             Some(sub) => {
                 let meta = self.meta.lock().expect("meta lock");
                 let list = meta
@@ -1065,7 +1079,7 @@ impl Termlab {
                     .filter(|a| a.running)
                     .position(|a| a.id == sub)
                     .map_or(1, |p| p + 1);
-                (guess, agent.description.clone())
+                (guess, agent.name.clone(), agent.description.clone())
             }
         };
         let panel_driver = PanelDriver { pty: &pty };
@@ -1094,7 +1108,7 @@ impl Termlab {
             return panel_driver.leave();
         };
         let is_target = |label: Option<&str>| {
-            label.is_some_and(|l| claude_panel_label_matches(l, &description))
+            label.is_some_and(|l| claude_panel_label_matches(l, &name, &description))
         };
         if panel.cursor.is_none()
             && panel.viewed.is_some_and(|v| v > 0)
@@ -1513,7 +1527,9 @@ impl Termlab {
             usage,
             resume_command,
             can_fork: adapter.can_fork() && rec.agent_session_id.is_some(),
-            can_resume: adapter.can_resume() && rec.agent_session_id.is_some(),
+            // A terminal "resumes" as a fresh shell in the same session.
+            can_resume: (adapter.can_resume() && rec.agent_session_id.is_some())
+                || rec.agent == AgentId::Shell,
             cwd: folder.path,
         })
     }
@@ -1939,6 +1955,7 @@ impl Termlab {
             }
             if let Some(detail) = effect.approval_detail {
                 m.approval_detail = detail;
+                m.hook_question = effect.question.clone();
             }
             // Re-read usage soon: a turn just progressed.
             m.usage_checked_at = 0;
@@ -2097,6 +2114,7 @@ impl Termlab {
             {
                 m.hook_status = None;
                 m.approval_detail = None;
+                m.hook_question = None;
             }
             // A hook's "Idle" holds until the agent prints again: some agents report turn
             // ends for side work, and the screen then shows what really happens next.
@@ -2111,10 +2129,19 @@ impl Termlab {
                     detail: m.approval_detail.clone(),
                     ..p.approval.clone()
                 },
-                None => Approval {
-                    question: format!("{} is waiting for you", rec.agent.display_name()),
-                    detail: m.approval_detail.clone(),
-                    options: Vec::new(),
+                None => match &m.hook_question {
+                    Some(q) => Approval {
+                        kind: PromptKind::Question,
+                        question: q.clone(),
+                        detail: None,
+                        options: Vec::new(),
+                    },
+                    None => Approval {
+                        kind: PromptKind::Permission,
+                        question: format!("{} is waiting for you", rec.agent.display_name()),
+                        detail: m.approval_detail.clone(),
+                        options: Vec::new(),
+                    },
                 },
             });
             let preview = screen.tail(PREVIEW_LINES);
@@ -2260,6 +2287,7 @@ fn default_title(req: &StartRequest) -> String {
         .filter(|m| !m.is_empty())
     {
         Some(msg) => one_line(msg.lines().next().unwrap_or(msg), 80),
+        None if req.agent == AgentId::Shell => "Terminal".into(),
         None => match &req.mode {
             StartMode::New => format!("New {} session", req.agent.display_name()),
             StartMode::Resume { .. } => format!("Resumed {} session", req.agent.display_name()),

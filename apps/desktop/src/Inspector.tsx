@@ -148,7 +148,7 @@ export function Inspector({ session: s }: { session: Session }) {
         ) : (
           details?.canResume && (
             <button className="btn" onClick={() => void store.run(() => api.restart(s.id))}>
-              Resume here
+              {s.agent === "shell" ? "Reopen terminal" : "Resume here"}
             </button>
           )
         )}

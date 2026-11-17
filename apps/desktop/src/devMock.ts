@@ -52,6 +52,7 @@ const sessions: Session[] = [
     model: "opus",
     preview: ["● Write migrations/0042_retry_queue.sql", "● Bash npm test -- billing", "  ✓ 41 passed · 0 failed", "Do you want to proceed?"],
     approval: {
+      kind: "permission",
       question: "Do you want to proceed?",
       detail: "$ psql -d billing_dev -f migrations/0042_retry_queue.sql",
       options: [

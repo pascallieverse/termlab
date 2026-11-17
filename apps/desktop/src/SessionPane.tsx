@@ -216,10 +216,13 @@ function ApprovalBar({ session: s }: { session: Session }) {
   const has = (c: ApprovalChoice) => c === "deny" || (a?.options.some((o) => o.choice === c) ?? false);
   const answer = (c: ApprovalChoice) => void store.run(() => api.answer(s.id, c));
   const parsed = (a?.options.length ?? 0) > 0;
+  const question = a?.kind === "question";
   return (
-    <div className="approval" role="region" aria-label="Permission request">
+    <div className="approval" role="region" aria-label={question ? "Question" : "Permission request"}>
       <div className="approval-text">
-        <span className="approval-title">{AGENTS[s.agent].name} is asking for permission</span>
+        <span className="approval-title">
+          {AGENTS[s.agent].name} {question ? "has a question for you" : "is asking for permission"}
+        </span>
         {a?.detail && <code className="mono">{a.detail}</code>}
         {a?.question && <span className="approval-question">{a.question}</span>}
         {!parsed && <span className="approval-question">Answer in the terminal above.</span>}

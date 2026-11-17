@@ -91,12 +91,13 @@ macro_rules! string_enum {
 }
 
 string_enum!(
-    /// The agent CLIs Termlab knows how to run.
+    /// The agent CLIs Termlab knows how to run, and a plain terminal.
     AgentId {
         Claude => "claude",
         Codex => "codex",
         Vibe => "vibe",
         Antigravity => "antigravity",
+        Shell => "shell",
     }
 );
 
@@ -107,6 +108,7 @@ impl AgentId {
             AgentId::Codex => "Codex",
             AgentId::Vibe => "Mistral Vibe",
             AgentId::Antigravity => "Antigravity",
+            AgentId::Shell => "Terminal",
         }
     }
 }
@@ -233,10 +235,23 @@ pub struct ApprovalOption {
     pub choice: Option<ApprovalChoice>,
 }
 
-/// A pending permission request, read from hooks and/or the screen.
+/// What the agent is waiting on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptKind {
+    /// Permission to run a tool, answered with the approval buttons.
+    #[default]
+    Permission,
+    /// A question of its own (Claude's AskUserQuestion form), answered in the terminal.
+    Question,
+}
+
+/// A pending permission request or question, read from hooks and/or the screen.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Approval {
+    #[serde(default)]
+    pub kind: PromptKind,
     /// The agent's question, e.g. "Do you want to proceed?".
     pub question: String,
     /// What it wants to do, e.g. "$ npm test" (from a hook, when available).

@@ -7,6 +7,7 @@ import { api, type AgentId } from "./api";
 import { THEME_EVENT, terminalTheme } from "./themes";
 import { claudeNewlineHandler } from "./terminalKeys";
 import { PREFS_EVENT, getPrefs } from "./prefs";
+import { onFileDrop, quotePaths } from "./fileDrop";
 
 const FONT = '"JetBrains Mono", Menlo, monospace';
 const RESET = [0x1b, 0x63]; // ESC c: the daemon sends it before replaying a snapshot
@@ -147,6 +148,13 @@ export function TerminalView({
         send(() => api.write(sessionId, "\x16"));
       };
       el.addEventListener("paste", onPaste, true);
+      // Files dropped on the terminal type their paths, as a paste so agents can tell
+      // them from typing (Claude Code attaches dropped images this way).
+      const stopFileDrop = onFileDrop(el.parentElement ?? el, (paths) => {
+        if (!liveRef.current) return;
+        term.paste(quotePaths(paths));
+        term.focus();
+      });
 
       const subs = [
         term.onData((d) => send(() => api.write(sessionId, d))),
@@ -233,6 +241,7 @@ export function TerminalView({
       cleanup = () => {
         ro.disconnect();
         el.removeEventListener("paste", onPaste, true);
+        stopFileDrop();
         window.removeEventListener(THEME_EVENT, onTheme);
         window.removeEventListener(PREFS_EVENT, onPrefs);
         cancelAnimationFrame(frame);

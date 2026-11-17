@@ -124,7 +124,55 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE sessions ADD COLUMN on_hold INTEGER NOT NULL DEFAULT 0;
     "#,
+    // 11: plain terminal sessions ('shell'). The CHECK constraint can't be changed in place,
+    //     so the table is rebuilt (with foreign keys off: see `REBUILD_MIGRATIONS`).
+    r#"
+    CREATE TABLE sessions_v11 (
+        id                TEXT PRIMARY KEY,
+        folder_id         INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        agent             TEXT NOT NULL CHECK (agent IN ('claude','codex','vibe','antigravity','aider','shell')),
+        title             TEXT NOT NULL,
+        model             TEXT,
+        permission_mode   TEXT,
+        isolation         TEXT NOT NULL DEFAULT 'checkout',
+        agent_session_id  TEXT,
+        status            TEXT NOT NULL,
+        exit_code         INTEGER,
+        created_at        INTEGER NOT NULL,
+        last_activity_at  INTEGER NOT NULL,
+        billing           TEXT NOT NULL DEFAULT 'unknown',
+        start_commit      TEXT,
+        transcript_path   TEXT,
+        notify            INTEGER NOT NULL DEFAULT 1,
+        origin            TEXT NOT NULL DEFAULT 'termlab',
+        term_cols         INTEGER,
+        term_rows         INTEGER,
+        resume_on_start   INTEGER NOT NULL DEFAULT 0,
+        agent_title       TEXT,
+        color             TEXT,
+        on_hold           INTEGER NOT NULL DEFAULT 0
+    );
+    INSERT INTO sessions_v11 (id, folder_id, agent, title, model, permission_mode, isolation,
+            agent_session_id, status, exit_code, created_at, last_activity_at, billing,
+            start_commit, transcript_path, notify, origin, term_cols, term_rows,
+            resume_on_start, agent_title, color, on_hold)
+        SELECT id, folder_id, agent, title, model, permission_mode, isolation,
+            agent_session_id, status, exit_code, created_at, last_activity_at, billing,
+            start_commit, transcript_path, notify, origin, term_cols, term_rows,
+            resume_on_start, agent_title, color, on_hold
+        FROM sessions;
+    DROP TABLE sessions;
+    ALTER TABLE sessions_v11 RENAME TO sessions;
+    CREATE INDEX sessions_folder ON sessions(folder_id);
+    CREATE INDEX sessions_agent_session ON sessions(agent, agent_session_id);
+    "#,
 ];
+
+/// Migrations that rebuild a table other tables point at. Dropping the old table with
+/// foreign keys on would cascade-delete those rows (a session's hook events), so foreign
+/// keys are off while they run (SQLite only allows that outside a transaction) and checked
+/// before committing.
+const REBUILD_MIGRATIONS: &[usize] = &[11];
 
 /// Migration 9 adds `folders.sort_order`. Some databases already have that column (it was
 /// first introduced by editing the initial schema, and added by hand to databases in use),
@@ -181,6 +229,22 @@ impl Db {
             )));
         }
         for (i, sql) in MIGRATIONS.iter().enumerate().skip(current) {
+            let rebuild = REBUILD_MIGRATIONS.contains(&(i + 1));
+            if rebuild {
+                self.conn.pragma_update(None, "foreign_keys", false)?;
+            }
+            let applied = self.apply_migration(i, sql, rebuild);
+            if rebuild {
+                self.conn.pragma_update(None, "foreign_keys", true)?;
+            }
+            applied?;
+            tracing::info!(version = i + 1, "applied database migration");
+        }
+        Ok(())
+    }
+
+    fn apply_migration(&mut self, i: usize, sql: &str, rebuild: bool) -> Result<()> {
+        {
             let tx = self.conn.transaction()?;
             let already_there = i + 1 == FOLDER_ORDER_MIGRATION
                 && tx
@@ -191,9 +255,18 @@ impl Db {
             if !already_there {
                 tx.execute_batch(sql)?;
             }
+            if rebuild
+                && tx
+                    .prepare("SELECT 1 FROM pragma_foreign_key_check")?
+                    .exists([])?
+            {
+                return Err(CoreError::InvalidInput(format!(
+                    "database migration {} would break links between tables",
+                    i + 1
+                )));
+            }
             tx.pragma_update(None, "user_version", (i + 1) as i64)?;
             tx.commit()?;
-            tracing::info!(version = i + 1, "applied database migration");
         }
         Ok(())
     }
@@ -774,6 +847,64 @@ mod tests {
         let d = db.add_folder("d", Path::new("/d"), 4).unwrap();
         assert_eq!(d.sort_order, 3);
         assert_eq!(ids(&db), vec![b, a, c, d.id]);
+    }
+
+    #[test]
+    fn terminal_sessions_migrate_without_losing_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shell.sqlite");
+        let s;
+        {
+            let db = Db::open(&path).unwrap();
+            let f = db.add_folder("api", Path::new("/src/api"), 1).unwrap();
+            s = SessionRecord {
+                on_hold: true,
+                color: Some("blue".into()),
+                ..sample_session(f.id)
+            };
+            db.insert_session(&s).unwrap();
+            db.set_color(s.id, Some("blue")).unwrap();
+            db.add_hook_event(s.id, 1_500, "Stop", "Finished its turn")
+                .unwrap();
+            // Back to the schema before terminals: the old CHECK constraint, version 10.
+            db.conn
+                .execute_batch(
+                    "PRAGMA foreign_keys = OFF;
+                     PRAGMA writable_schema = ON;
+                     UPDATE sqlite_master SET sql = replace(sql, ',''shell''', '')
+                         WHERE name = 'sessions';
+                     PRAGMA writable_schema = OFF;",
+                )
+                .unwrap();
+            db.conn.pragma_update(None, "user_version", 10).unwrap();
+        }
+        {
+            let conn = Connection::open(&path).unwrap();
+            let sql: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE name = 'sessions'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                !sql.contains("'shell'"),
+                "the test starts from the old schema"
+            );
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len());
+        // Every column and the session's hook events came through the rebuild.
+        assert_eq!(db.session(s.id).unwrap(), s);
+        assert_eq!(db.hook_events(s.id).unwrap().len(), 1);
+        // A terminal session can be stored now.
+        let mut shell = sample_session(s.folder_id);
+        shell.agent = AgentId::Shell;
+        db.insert_session(&shell).unwrap();
+        assert_eq!(db.session(shell.id).unwrap().agent, AgentId::Shell);
+        // Foreign keys are back on: deleting a session still removes its events.
+        db.delete_session(s.id).unwrap();
+        assert!(db.hook_events(s.id).unwrap().is_empty());
     }
 
     #[test]

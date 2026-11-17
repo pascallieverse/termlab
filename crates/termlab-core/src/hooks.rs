@@ -50,6 +50,9 @@ pub struct HookEffect {
     pub status: Option<SessionStatus>,
     /// `Some(None)` clears the pending approval detail.
     pub approval_detail: Option<Option<String>>,
+    /// The question the agent asked the user (AskUserQuestion), when `approval_detail` is
+    /// set; any other `approval_detail` clears it.
+    pub question: Option<String>,
     pub agent_session_id: Option<String>,
     pub transcript_path: Option<String>,
     /// One line for the Timeline tab; `None` to not record the event.
@@ -118,6 +121,18 @@ fn interpret_claude(event: &str, p: &Value) -> HookEffect {
             e.approval_detail = Some(None);
             e.summary = s(p, "prompt").map(|t| format!("You: {}", one_line(t, 200)));
         }
+        // Claude's question form waits for the user just like a permission prompt does.
+        "PreToolUse" | "PermissionRequest" if s(p, "tool_name") == Some("AskUserQuestion") => {
+            let question = p
+                .pointer("/tool_input/questions/0/question")
+                .and_then(Value::as_str)
+                .map(|q| one_line(q, 200))
+                .unwrap_or_else(|| "Claude has a question".into());
+            e.status = Some(SessionStatus::NeedsYou);
+            e.approval_detail = Some(None);
+            e.summary = Some(format!("Asked you: {question}"));
+            e.question = Some(question);
+        }
         "PreToolUse" => {
             e.status = Some(SessionStatus::Running);
             e.summary = Some(tool());
@@ -172,6 +187,7 @@ fn interpret_codex(event: &str, p: &Value) -> HookEffect {
     HookEffect {
         status: Some(SessionStatus::Idle),
         approval_detail: Some(None),
+        question: None,
         agent_session_id: s(p, "thread-id").map(String::from),
         transcript_path: None,
         summary: Some(match s(p, "last-assistant-message") {
@@ -261,5 +277,25 @@ mod tests {
             "Edit src/a.rs"
         );
         assert_eq!(describe_tool("Task", &json!({})), "Task");
+    }
+
+    #[test]
+    fn ask_user_question_needs_you() {
+        let p = json!({
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{"question": "Is this setup right?", "header": "AFAS", "options": []}]}
+        });
+        for event in ["PreToolUse", "PermissionRequest"] {
+            let e = interpret_claude(event, &p);
+            assert_eq!(e.status, Some(SessionStatus::NeedsYou));
+            assert_eq!(e.question.as_deref(), Some("Is this setup right?"));
+            assert_eq!(e.approval_detail, Some(None));
+        }
+        let done = interpret_claude("PostToolUse", &p);
+        assert_eq!(
+            (done.status, done.approval_detail),
+            (Some(SessionStatus::Running), Some(None))
+        );
+        assert_eq!(done.question, None);
     }
 }

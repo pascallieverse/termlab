@@ -44,7 +44,8 @@ export function Palette() {
   const [index, setIndex] = useState(0);
   const close = () => store.setPaletteOpen(false);
   const current = store.sessions.find((s) => s.id === store.selectedId);
-  const defaultAgent = store.agents?.find((a) => a.installed);
+  const defaultAgent = store.agents?.find((a) => a.installed && a.agent !== "shell");
+  const canOpenTerminal = !!store.agents?.some((a) => a.agent === "shell" && a.installed);
 
   const items = useMemo(() => {
     const out: Item[] = [];
@@ -103,6 +104,20 @@ export function Palette() {
           icon: <Icon name="plus" size={16} />,
           right: shortcutLabel("newSession") ? <Kbd>{shortcutLabel("newSession")}</Kbd> : undefined,
           run: () => store.openNewSession({ folderId: f.id, agent: defaultAgent.agent }),
+        });
+      }
+      if (canOpenTerminal) {
+        out.push({
+          id: `c:terminal:${f.id}`,
+          group: "Actions",
+          label: `Open a terminal in ${path}`,
+          kind: "command",
+          icon: <Icon name="terminal" size={16} />,
+          run: () =>
+            void store.run(async () => {
+              const s = await api.startSession({ folderId: f.id, agent: "shell", permission: "ask_first", notify: false });
+              store.show(s);
+            }),
         });
       }
       out.push({
@@ -168,7 +183,7 @@ export function Palette() {
       },
     );
     return out;
-  }, [store, current, defaultAgent]);
+  }, [store, current, defaultAgent, canOpenTerminal]);
 
   const results = useMemo(() => {
     let q = query;

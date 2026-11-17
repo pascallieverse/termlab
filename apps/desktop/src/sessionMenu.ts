@@ -11,7 +11,8 @@ type Store = ReturnType<typeof useStore>;
 export function sessionMenu(store: Store, s: Session): MenuItem[] {
   const info = store.agents?.find((a) => a.agent === s.agent);
   const name = AGENTS[s.agent].name;
-  const canResume = !s.live && !!s.agentSessionId && !!info?.canResume;
+  // A terminal reopens as a fresh shell.
+  const canResume = !s.live && (s.agent === "shell" || (!!s.agentSessionId && !!info?.canResume));
   const canFork = !!s.agentSessionId && !!info?.canFork;
   const items: MenuItem[] = [
     { label: "Open", onSelect: () => store.select(s.id, { view: "focus", tab: "terminal" }) },
@@ -35,7 +36,7 @@ export function sessionMenu(store: Store, s: Session): MenuItem[] {
   ];
   if (!s.live) {
     items.push({
-      label: "Resume here",
+      label: s.agent === "shell" ? "Reopen terminal" : "Resume here",
       disabled: !canResume || store.restarting.has(s.id),
       hint: canResume ? undefined : `${name}'s session id isn't known, or ${name} can't resume`,
       onSelect: () =>

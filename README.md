@@ -64,6 +64,9 @@ Agents without hooks get their status from the terminal screen instead.
   different agent with a summary of what was done so far.
 - **Import existing sessions.** Load sessions you started outside Termlab, from one project or
   from anywhere on the machine.
+- **Plain terminals** next to the agents: open your own shell in a project from New session
+  or the command palette.
+- **Drop files on a terminal** to type their paths, as in Terminal.app and iTerm.
 - **Split view.** Two sessions next to each other.
 - **Notifications** when a session needs you, finishes or fails.
 - **On hold.** Park a session so it stops counting towards attention badges and notifications,

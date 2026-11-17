@@ -78,6 +78,8 @@ function StartNew() {
 
   const info = agents.find((a) => a.agent === agent);
   const model = modelChoice === CUSTOM ? customModel.trim() : modelChoice;
+  // A plain terminal: no model, permissions or "needs input" notifications.
+  const shell = agent === "shell";
 
   useEffect(() => {
     if (!agent && installed[0]) setAgent(installed[0].agent);
@@ -95,10 +97,10 @@ function StartNew() {
             agent,
             model: info?.modelFlag && model ? model : null,
             permission,
-            notify,
+            notify: notify && !shell,
           }
         : null,
-    [agent, folderId, info, model, permission, notify],
+    [agent, folderId, info, model, permission, notify, shell],
   );
 
   async function chooseFolder() {
@@ -131,7 +133,7 @@ function StartNew() {
         }}
       >
         <fieldset className="field">
-          <legend className="label">Agent</legend>
+          <legend className="label">Agent or terminal</legend>
           <div className="agent-cards">
             {agents.map((a) => (
               <button
@@ -144,11 +146,13 @@ function StartNew() {
               >
                 <Monogram agent={a.agent} size={32} />
                 <span className="agent-card-name">{a.name}</span>
-                <span className="mono faint small">{a.installed ? a.binary : "Not installed"}</span>
+                <span className="mono faint small">
+                  {!a.installed ? "Not installed" : a.agent === "shell" ? fileName(a.installed.path) : a.binary}
+                </span>
               </button>
             ))}
           </div>
-          {installed.length === 0 && store.agents && (
+          {!installed.some((a) => a.agent !== "shell") && store.agents && (
             <p className="muted small">No agent CLIs were found on your PATH.</p>
           )}
         </fieldset>
@@ -157,78 +161,84 @@ function StartNew() {
           <FolderPicker value={folderId} onChange={setFolderId} onChooseOther={() => void chooseFolder()} />
         )}
 
-        <div className="two-col">
-          <div className="field">
-            <label htmlFor="ns-model" className="label">
-              Model
-            </label>
-            {info?.modelFlag === false ? (
-              <select id="ns-model" className="select" disabled>
-                <option>Set in {info.name}'s own config</option>
-              </select>
-            ) : (
-              <>
-                <select id="ns-model" className="select" value={modelChoice} onChange={(e) => setModelChoice(e.target.value)}>
-                  <option value="">Default (the agent's own setting)</option>
-                  {info?.modelSuggestions.map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
-                  <option value={CUSTOM}>Other…</option>
+        {!shell && (
+          <div className="two-col">
+            <div className="field">
+              <label htmlFor="ns-model" className="label">
+                Model
+              </label>
+              {info?.modelFlag === false ? (
+                <select id="ns-model" className="select" disabled>
+                  <option>Set in {info.name}'s own config</option>
                 </select>
-                {modelChoice === CUSTOM && (
-                  <input
-                    className="input mono"
-                    aria-label="Model name"
-                    placeholder="model name"
-                    value={customModel}
-                    onChange={(e) => setCustomModel(e.target.value)}
-                  />
-                )}
-              </>
-            )}
+              ) : (
+                <>
+                  <select id="ns-model" className="select" value={modelChoice} onChange={(e) => setModelChoice(e.target.value)}>
+                    <option value="">Default (the agent's own setting)</option>
+                    {info?.modelSuggestions.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                    <option value={CUSTOM}>Other…</option>
+                  </select>
+                  {modelChoice === CUSTOM && (
+                    <input
+                      className="input mono"
+                      aria-label="Model name"
+                      placeholder="model name"
+                      value={customModel}
+                      onChange={(e) => setCustomModel(e.target.value)}
+                    />
+                  )}
+                </>
+              )}
+            </div>
+            <div className="field">
+              <label htmlFor="ns-iso" className="label">
+                Run in
+              </label>
+              <select id="ns-iso" className="select" defaultValue="checkout">
+                <option value="checkout">Current checkout</option>
+              </select>
+            </div>
           </div>
-          <div className="field">
-            <label htmlFor="ns-iso" className="label">
-              Run in
-            </label>
-            <select id="ns-iso" className="select" defaultValue="checkout">
-              <option value="checkout">Current checkout</option>
-            </select>
-          </div>
-        </div>
+        )}
 
-        <fieldset className="field">
-          <legend className="label">Permissions</legend>
-          <div className="perm-cards">
-            {PERMISSIONS.map((p) => (
-              <button
-                key={p.key}
-                className={`perm-card${permission === p.key ? " on" : ""}`}
-                aria-pressed={permission === p.key}
-                onClick={() => setPermission(p.key)}
-              >
-                <span className="perm-label">{p.label}</span>
-                <span className="muted small">{p.desc}</span>
-              </button>
-            ))}
-          </div>
-        </fieldset>
+        {!shell && (
+          <fieldset className="field">
+            <legend className="label">Permissions</legend>
+            <div className="perm-cards">
+              {PERMISSIONS.map((p) => (
+                <button
+                  key={p.key}
+                  className={`perm-card${permission === p.key ? " on" : ""}`}
+                  aria-pressed={permission === p.key}
+                  onClick={() => setPermission(p.key)}
+                >
+                  <span className="perm-label">{p.label}</span>
+                  <span className="muted small">{p.desc}</span>
+                </button>
+              ))}
+            </div>
+          </fieldset>
+        )}
 
       </div>
 
       <div className="dialog-foot">
-        <label className="check">
-          <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />
-          Notify me when it needs input
-        </label>
+        {!shell && (
+          <label className="check">
+            <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />
+            Notify me when it needs input
+          </label>
+        )}
         <div className="spacer" />
         <button className="btn tall" onClick={store.closeNewSession}>
           Cancel
         </button>
         <button className="btn primary tall" disabled={!request || starting} onClick={() => void start()}>
-          Start session <span className="mono kbd-hint">{MOD_LABEL}↵</span>
+          {shell ? "Open terminal" : "Start session"} <span className="mono kbd-hint">{MOD_LABEL}↵</span>
         </button>
       </div>
     </>
@@ -549,4 +559,9 @@ function ResumeTab() {
       )}
     </div>
   );
+}
+
+/** The last part of a path ("/bin/zsh" → "zsh"). */
+function fileName(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
 }

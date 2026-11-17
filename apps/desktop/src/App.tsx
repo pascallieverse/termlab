@@ -113,7 +113,7 @@ function Header() {
   const bindings = useBindings();
   const running = store.sessions.filter((s) => !s.onHold && s.status === "running").length;
   const needs = store.sessions.filter((s) => !s.onHold && s.status === "needs_you").length;
-  const installed = (store.agents ?? []).filter((a) => a.installed).length;
+  const installed = (store.agents ?? []).filter((a) => a.installed && a.agent !== "shell").length;
   const startOfDay = new Date().setHours(0, 0, 0, 0);
   // Spend is shown only for API-key sessions; subscription sessions have no per-session cost.
   const spend = store.sessions

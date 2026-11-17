@@ -10,7 +10,9 @@ import { MOD_LABEL } from "./shortcuts";
 export function HandOffDialog() {
   const store = useStore();
   const source = store.sessions.find((s) => s.id === store.handOffFor);
-  const installed = (store.agents ?? []).filter((a) => a.installed);
+  // Hand-offs go to agents; a plain terminal can't take a brief.
+  const targets = (store.agents ?? []).filter((a) => a.agent !== "shell");
+  const installed = targets.filter((a) => a.installed);
   const [agent, setAgent] = useState<AgentId | null>(
     installed.find((a) => a.agent !== source?.agent)?.agent ?? installed[0]?.agent ?? null,
   );
@@ -54,7 +56,7 @@ export function HandOffDialog() {
         <fieldset className="field">
           <legend className="label">Agent</legend>
           <div className="agent-cards">
-            {(store.agents ?? []).map((a) => (
+            {targets.map((a) => (
               <button
                 key={a.agent}
                 className={`agent-card${agent === a.agent ? " on" : ""}`}

@@ -22,7 +22,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::adapter::StatusHints;
-use crate::model::{Approval, ApprovalChoice, ApprovalOption, Millis, SessionStatus};
+use crate::model::{Approval, ApprovalChoice, ApprovalOption, Millis, PromptKind, SessionStatus};
 use crate::pty::ScreenText;
 
 /// Output within this window means the agent is working.
@@ -84,13 +84,27 @@ const MARKERS: &[char] = &['❯', '›', '▶', '▸', '➤', '●', '>'];
 /// Box-drawing characters that may frame a prompt.
 const FRAME: &str = "│┃|╎║";
 
-/// Finds a permission prompt near the bottom of the screen: a list with a selection marker
-/// (numbered or not), or failing that a numbered list.
+/// Finds a prompt near the bottom of the screen: a list with a selection marker (numbered or
+/// not), or failing that a numbered list. That's a permission prompt when one of its options
+/// allows, or Claude's question form (see [`is_question_form`]), whatever its options say.
 pub fn parse_prompt(rows: &[String]) -> Option<ParsedPrompt> {
     let last = rows.iter().rposition(|r| !r.trim().is_empty())?;
     let zone_start = last.saturating_sub(PROMPT_ZONE_ROWS);
     let (first_row, options, selected) =
         parse_marked(rows, zone_start, last).or_else(|| parse_numbered(rows, zone_start, last))?;
+    if is_question_form(&rows[zone_start..=last], &options) {
+        // Its answers are the user's to pick (several questions, free text, multi-select),
+        // so it gets no buttons, even when an answer happens to start with "Yes".
+        return Some(ParsedPrompt {
+            approval: Approval {
+                kind: PromptKind::Question,
+                question: question_above(rows, first_row),
+                detail: None,
+                options: Vec::new(),
+            },
+            selected,
+        });
+    }
     if options.len() < 2
         || !options.iter().any(|o| {
             matches!(
@@ -103,12 +117,43 @@ pub fn parse_prompt(rows: &[String]) -> Option<ParsedPrompt> {
     }
     Some(ParsedPrompt {
         approval: Approval {
+            kind: PromptKind::Permission,
             question: question_above(rows, first_row),
             detail: None,
             options,
         },
         selected,
     })
+}
+
+/// Claude Code's AskUserQuestion form. Seen live on 2.1.325:
+///
+/// ```text
+/// ←  ☐ Op factuur  ☐ Bestaand  ☐ AFAS invoice  ✔ Submit  →
+/// │ For members paying via Mollie, … Is this setup right?
+/// ❯ 1. Yes, as described (Recommended)
+///      The AFAS subscription gets "Niet factureren" …
+///   2. AFAS invoices, Mollie pays it
+///   3. Type something.
+/// ────────────────────────────────────────
+///   4. Chat about this
+/// Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+/// ```
+///
+/// and, after the last question, `Ready to submit your answers?` with `1. Submit answers` /
+/// `2. Cancel`. Permission prompts have none of these options, nor that footer.
+fn is_question_form(zone: &[String], options: &[ApprovalOption]) -> bool {
+    let own_option = options.iter().any(|o| {
+        let l = o.label.trim().trim_end_matches('.').to_lowercase();
+        matches!(
+            l.as_str(),
+            "type something" | "chat about this" | "submit answers"
+        )
+    });
+    own_option
+        || zone
+            .iter()
+            .any(|r| r.contains("Enter to select") && r.contains("to navigate"))
 }
 
 /// The column where a row's text starts, if everything before it is space or frame.
@@ -284,10 +329,18 @@ pub fn answer_keys(
     choice: ApprovalChoice,
     application_cursor: bool,
 ) -> Option<Vec<u8>> {
+    let prompt = parse_prompt(&screen.rows);
+    // A question is answered in the terminal; Esc would throw the whole form away.
+    if prompt
+        .as_ref()
+        .is_some_and(|p| p.approval.kind == PromptKind::Question)
+    {
+        return None;
+    }
     if choice == ApprovalChoice::Deny {
         return Some(b"\x1b".to_vec());
     }
-    let prompt = parse_prompt(&screen.rows)?;
+    let prompt = prompt?;
     let target = prompt
         .approval
         .options
@@ -412,6 +465,93 @@ mod tests {
         "",
         "",
     ];
+
+    /// Claude Code 2.1.325's AskUserQuestion form (from a live session's scrollback).
+    fn claude_question(options: &[&str]) -> Vec<String> {
+        let mut rows = vec![
+            "⏺ Three choices change how I build it, so I'll ask first:".to_string(),
+            "─".repeat(80),
+            "←  ☐ Op factuur  ☐ Bestaand  ☐ AFAS invoice  ✔ Submit  →".into(),
+            "".into(),
+            "│ For members paying via Mollie, AFAS keeps the subscription. Is this setup right?"
+                .into(),
+            "".into(),
+        ];
+        for (i, o) in options.iter().enumerate() {
+            let marker = if i == 0 { "❯" } else { " " };
+            rows.push(format!("{marker} {}. {o}", i + 1));
+            rows.push("     Some explanation of this answer.".into());
+        }
+        rows.push(format!("  {}. Type something.", options.len() + 1));
+        rows.push("─".repeat(80));
+        rows.push(format!("  {}. Chat about this", options.len() + 2));
+        rows.push("".into());
+        rows.push("Enter to select · Tab/Arrow keys to navigate · Esc to cancel".into());
+        rows
+    }
+
+    #[test]
+    fn claude_questions_are_not_permission_prompts() {
+        // An answer starting with "Yes" doesn't make it a permission prompt.
+        let rows = claude_question(&[
+            "Yes, as described (Recommended)",
+            "AFAS invoices, Mollie pays it",
+        ]);
+        let p = parse_prompt(&rows).expect("question");
+        assert_eq!(p.approval.kind, PromptKind::Question);
+        assert!(p.approval.options.is_empty());
+        assert!(p.approval.question.ends_with("Is this setup right?"));
+        // Nor does an approval button answer it: Esc would cancel the whole form.
+        let s = ScreenText {
+            rows,
+            bracketed_paste: false,
+            application_cursor: false,
+        };
+        assert_eq!(answer_keys(&s, ApprovalChoice::AllowOnce, false), None);
+        assert_eq!(answer_keys(&s, ApprovalChoice::Deny, false), None);
+    }
+
+    #[test]
+    fn claude_questions_without_a_yes_still_need_you() {
+        let rows = claude_question(&["AFAS invoices them (Recommended)", "Switch them to Mollie"]);
+        let p = parse_prompt(&rows).expect("question");
+        assert_eq!(p.approval.kind, PromptKind::Question);
+        let s = ScreenText {
+            rows,
+            bracketed_paste: false,
+            application_cursor: false,
+        };
+        let hints = StatusHints {
+            needs_input: vec![],
+        };
+        assert_eq!(
+            heuristic_status(10_000, 9_999, &s, &hints),
+            SessionStatus::NeedsYou
+        );
+    }
+
+    #[test]
+    fn claude_question_review_needs_you() {
+        let rows = screen(&[
+            "←  ☒ Op factuur  ☒ Bestaand  ☒ AFAS invoice  ✔ Submit  →",
+            "",
+            "Review your answers",
+            "",
+            "Ready to submit your answers?",
+            "",
+            "❯ 1. Submit answers",
+            "  2. Cancel",
+        ]);
+        let p = parse_prompt(&rows.rows).expect("question");
+        assert_eq!(p.approval.kind, PromptKind::Question);
+    }
+
+    #[test]
+    fn permission_prompts_stay_permission_prompts() {
+        let p = parse_prompt(&screen(CLAUDE).rows).expect("prompt");
+        assert_eq!(p.approval.kind, PromptKind::Permission);
+        assert_eq!(p.approval.options.len(), 3);
+    }
 
     #[test]
     fn real_claude_trust_dialog_moves_off_the_no_default() {

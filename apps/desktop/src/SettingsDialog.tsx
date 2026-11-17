@@ -82,7 +82,7 @@ export function SettingsDialog() {
   }
 
   const current = SECTIONS.find((s) => s.id === section) ?? SECTIONS[0];
-  const installed = store.agents?.filter((a) => a.installed).length;
+  const installed = store.agents?.filter((a) => a.installed && a.agent !== "shell").length;
   const badge: Partial<Record<SectionId, ReactNode>> = {
     general: !store.daemon.connected ? <span className="settings-tab-dot warn" title="Background service not connected" /> : null,
     agents: store.agents ? <span className="settings-tab-count">{installed}</span> : null,
@@ -464,7 +464,7 @@ function AgentsSection() {
         {store.agents === null ? (
           <Row title="Looking…" />
         ) : (
-          store.agents.map((a) => (
+          store.agents.filter((a) => a.agent !== "shell").map((a) => (
             <div key={a.agent} className={`settings-row agent-row${a.installed ? "" : " missing"}`}>
               <Monogram agent={a.agent} size={30} />
               <div className="settings-row-text">

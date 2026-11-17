@@ -10,9 +10,11 @@ import "@fontsource/jetbrains-mono/600.css";
 import "./styles.css";
 import { App } from "./App";
 import { applyTheme, currentTheme } from "./themes";
+import { installDesktopBehaviour } from "./desktopBehaviour";
 
 // Apply the chosen theme before the first paint.
 applyTheme(currentTheme());
+installDesktopBehaviour();
 
 async function start() {
   // In a plain browser during development, mock the daemon so the UI can be inspected.

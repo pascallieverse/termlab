@@ -3,7 +3,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-export type AgentId = "claude" | "codex" | "vibe" | "antigravity";
+export type AgentId = "claude" | "codex" | "vibe" | "antigravity" | "shell";
 export type SessionStatus = "needs_you" | "running" | "idle" | "done" | "error";
 export type Billing = "subscription" | "api_key" | "unknown";
 export type PermissionPreset = "ask_first" | "auto_edit" | "full_auto";
@@ -24,6 +24,8 @@ export interface ApprovalOption {
 }
 
 export interface Approval {
+  /** A permission prompt (answered with the buttons) or a question of the agent's own. */
+  kind: "permission" | "question";
   question: string;
   detail: string | null;
   options: ApprovalOption[];

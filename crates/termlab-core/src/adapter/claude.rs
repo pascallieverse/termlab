@@ -903,8 +903,8 @@ pub struct AgentPanel {
     pub viewed: Option<usize>,
     /// Index into the whole list of the cursor, while the list has focus.
     pub cursor: Option<usize>,
-    /// The label on the input box's top border: the agent in view's description (or the
-    /// session's name for `main`).
+    /// The label on the input box's top border: the agent in view's description, or
+    /// `@name` for a named teammate (the session's name for `main`).
     pub label: Option<String>,
 }
 
@@ -1001,12 +1001,16 @@ pub fn claude_agent_panel(rows: &[String]) -> Option<AgentPanel> {
     Some(panel)
 }
 
-/// Whether the input box's label names the agent described as `description`. The label can
-/// be cut short with `…`.
-pub fn claude_panel_label_matches(label: &str, description: &str) -> bool {
+/// Whether the input box's label names the agent called `name` and described as
+/// `description`. A plain sub-agent's label is its description; a named teammate's is
+/// `@name` (seen live on 2.1.325). The label can be cut short with `…`.
+pub fn claude_panel_label_matches(label: &str, name: &str, description: &str) -> bool {
     let label = label.trim_end_matches('…').trim();
-    let description = description.trim();
-    !label.is_empty() && (description == label || description.starts_with(label))
+    let cut_from = |full: &str, part: &str| !part.is_empty() && full.trim().starts_with(part);
+    match label.strip_prefix('@') {
+        Some(handle) if cut_from(name, handle) => true,
+        _ => cut_from(description, label),
+    }
 }
 
 #[cfg(test)]
@@ -1051,10 +1055,12 @@ mod agent_panel_tests {
         assert_eq!((p.viewed, p.cursor), (Some(1), Some(1)));
         assert!(claude_panel_label_matches(
             p.label.as_deref().unwrap(),
+            "general-purpose",
             "Alpha probe"
         ));
         assert!(!claude_panel_label_matches(
             p.label.as_deref().unwrap(),
+            "general-purpose",
             "Beta probe"
         ));
     }
@@ -1084,9 +1090,46 @@ mod agent_panel_tests {
     fn long_labels_match_by_prefix() {
         assert!(claude_panel_label_matches(
             "Livewire/page-build…",
+            "general-purpose",
             "Livewire/page-builder exceptions"
         ));
-        assert!(!claude_panel_label_matches("…", "anything"));
+        assert!(!claude_panel_label_matches(
+            "…",
+            "general-purpose",
+            "anything"
+        ));
+    }
+
+    #[test]
+    fn named_teammates_are_labelled_with_their_name() {
+        // As drawn by 2.1.325 for agents started with a `name`.
+        let rows = screen(&format!(
+            "──────────────────────────────────────── @console-urgent ─\n\
+             ❯ Message @console-urgent…\n{RULE}\n\
+             \x20 Enter to view · x to stop · ctrl+x ctrl+k to stop all agents\n\n\
+             \x20 ○ main\n\
+             \x20 ● console-urgent  Console: urgent pushes\n\
+             ❯ ○ core-urgent     Core+monitor: urgent alerts\n"
+        ));
+        let p = claude_agent_panel(&rows).unwrap();
+        assert_eq!((p.viewed, p.cursor), (Some(1), Some(2)));
+        let label = p.label.as_deref().unwrap();
+        assert!(claude_panel_label_matches(
+            label,
+            "console-urgent",
+            "Console: urgent pushes"
+        ));
+        assert!(!claude_panel_label_matches(
+            label,
+            "core-urgent",
+            "Core+monitor: urgent alerts"
+        ));
+        assert!(claude_panel_label_matches(
+            "@console-urg…",
+            "console-urgent",
+            "x"
+        ));
+        assert!(!claude_panel_label_matches("@", "console-urgent", "x"));
     }
 }
 

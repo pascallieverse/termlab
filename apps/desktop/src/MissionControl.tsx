@@ -74,7 +74,11 @@ export function MissionControl() {
           {waiting.slice(0, 3).map((s) => (
             <span key={s.id} className="waiting-item">
               <b>{store.folderOf(s)?.name ?? ""}</b> · {AGENTS[s.agent].name}{" "}
-              {s.status === "error" ? "exited with an error" : (s.approval?.detail ?? "needs your input")}
+              {s.status === "error"
+                ? "exited with an error"
+                : s.approval?.kind === "question"
+                  ? "has a question"
+                  : (s.approval?.detail ?? "needs your input")}
             </span>
           ))}
           <div className="spacer" />

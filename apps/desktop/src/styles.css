@@ -49,7 +49,19 @@ body {
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+  /* An app, not a page: labels and buttons aren't selectable text, and the pointer stays
+     an arrow over them. The places with text worth copying opt back in below. */
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
 }
+input, textarea, [contenteditable="true"], [contenteditable=""],
+.diff-table td:not(.ln), .diff-path, .tl-text, .facts dd, .file-path,
+.toast > span, .error-text, [role="alert"], .brief, .approval-text code {
+  -webkit-user-select: text;
+  user-select: text;
+}
+img, a { -webkit-user-drag: none; }
 button, input, textarea, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: default; opacity: 0.45; }
@@ -459,6 +471,10 @@ h1, h2, h3 { margin: 0; }
 .session-body { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--terminal); }
 .terminal-host { position: relative; flex: 1; min-height: 0; overflow: hidden; background: var(--terminal); }
 .terminal-surface { position: absolute; inset: 12px 4px 8px 16px; }
+.terminal-host.is-drop-target::after {
+  content: ""; position: absolute; inset: 4px; pointer-events: none; z-index: 10;
+  border: 2px dashed var(--accent); border-radius: 8px;
+}
 .pane-message { padding: 24px; color: var(--muted); }
 
 .approval {
