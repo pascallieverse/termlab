@@ -12,6 +12,8 @@ permissions:
 env:
   # "true" when the repository has the macOS signing secrets (see docs/releasing.md).
   MAC_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
+  # "true" when it has Termlab's own self-signed certificate instead (see docs/releasing.md).
+  MAC_SELF_SIGNING: ${{ secrets.MAC_SELF_SIGNED_CERTIFICATE != '' }}
   # "true" when the repository has the update signing key: the builds then update themselves.
   UPDATER: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
   BUILD_CONFIG: --config src-tauri/release.conf.json ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && '--config src-tauri/updater.conf.json' || '' }}
@@ -100,8 +102,33 @@ jobs:
           releaseDraft: true
           args: ${{ env.BUILD_CONFIG }} --target ${{ matrix.target }}
 
-      # Everything else, and macOS without the secrets (then signed ad hoc: it opens only
-      # after the user allows it in Privacy & Security).
+      # Without a Developer ID: Termlab's self-signed certificate. macOS keys an app's
+      # permissions (Accessibility, Screen Recording) to its signature; with a certificate
+      # they survive updates, while an ad hoc signature is new for every build.
+      - name: Self-signed certificate (macOS)
+        if: runner.os == 'macOS' && env.MAC_SIGNING != 'true' && env.MAC_SELF_SIGNING == 'true'
+        env:
+          CERTIFICATE: ${{ secrets.MAC_SELF_SIGNED_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MAC_SELF_SIGNED_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/termlab-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 16)"
+          printf '%s' "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/signing.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          # codesign only uses a certificate trusted for code signing.
+          security find-certificate -c "Termlab Code Signing" -p "$keychain" > "$RUNNER_TEMP/signing.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/signing.pem"
+          security find-identity -v -p codesigning "$keychain"
+          echo "APPLE_SIGNING_IDENTITY=Termlab Code Signing" >> "$GITHUB_ENV"
+
+      # Everything else. macOS with the self-signed certificate, or ad hoc without one: it
+      # opens only after the user allows it in Privacy & Security.
       - name: Build
         if: runner.os != 'macOS' || env.MAC_SIGNING != 'true'
         uses: tauri-apps/tauri-action@v1
@@ -113,3 +140,13 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseDraft: true
           args: ${{ env.BUILD_CONFIG }} --target ${{ matrix.target }}
+
+      # Permissions only survive updates when macOS identifies the app by its certificate
+      # ("certificate leaf"), not by the build's hash ("cdhash"), as with ad hoc signing.
+      - name: Check the signature (macOS)
+        if: runner.os == 'macOS' && env.MAC_SIGNING != 'true' && env.MAC_SELF_SIGNING == 'true'
+        run: |
+          app="$(find target -maxdepth 6 -path '*/bundle/macos/Termlab.app' | head -n 1)"
+          codesign --verify --deep --strict "$app"
+          codesign -d -r - "$app" 2>&1 | tee "$RUNNER_TEMP/requirement.txt"
+          grep -q 'certificate leaf' "$RUNNER_TEMP/requirement.txt"

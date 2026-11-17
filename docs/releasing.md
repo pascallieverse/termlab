@@ -29,6 +29,29 @@ Without any secrets the workflow still builds everything:
   System Settings → Privacy & Security.
 - Windows is unsigned. SmartScreen warns before the installer runs.
 
+### Self-signed (current)
+
+Since 0.2.3 the macOS app is signed with Termlab's own self-signed certificate,
+"Termlab Code Signing" (valid until 2046). macOS keys an app's permissions (Accessibility,
+Screen Recording, …) to its signature: an ad hoc signature is the build's hash, so every
+update looked like a new app and lost them; with the certificate they carry over. First
+installs still need "Open anyway" in Privacy & Security, as with ad hoc signing.
+
+- The certificate and its key: `~/.tauri/macos-signing/termlab-signing.p12` on the
+  maintainer's Mac; its password is in the macOS Keychain as "Termlab code signing
+  certificate".
+- Repository secrets: `MAC_SELF_SIGNED_CERTIFICATE` (the `.p12`, base64:
+  `base64 -i termlab-signing.p12`) and `MAC_SELF_SIGNED_CERTIFICATE_PASSWORD`.
+- The workflow imports it into a temporary keychain on the runner, trusts it for code
+  signing there (`codesign` refuses an untrusted certificate) and passes it to Tauri as
+  `APPLE_SIGNING_IDENTITY`. A check after the build fails the run if the app's designated
+  requirement isn't the certificate.
+
+Keep the `.p12` and its password backed up. A new certificate means one more round of
+granting permissions again after that update.
+
+### Developer ID
+
 For a signed and notarized macOS build, add these repository secrets
 (Settings → Secrets and variables → Actions):
 
@@ -41,7 +64,8 @@ For a signed and notarized macOS build, add these repository secrets
 | `APPLE_API_ISSUER` | That key's issuer ID |
 | `APPLE_API_PRIVATE_KEY` | The contents of the key's `.p8` file |
 
-The workflow signs when `APPLE_CERTIFICATE` is set and otherwise falls back to ad hoc.
+The workflow signs with the Developer ID when `APPLE_CERTIFICATE` is set, else with the
+self-signed certificate when that is set, and otherwise falls back to ad hoc.
 
 ## Updates from inside the app
 
