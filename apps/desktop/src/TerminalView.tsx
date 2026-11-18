@@ -8,6 +8,7 @@ import { THEME_EVENT, terminalTheme } from "./themes";
 import { claudeNewlineHandler } from "./terminalKeys";
 import { PREFS_EVENT, getPrefs } from "./prefs";
 import { onFileDrop, quotePaths } from "./fileDrop";
+import { arrowKeys, sgrWheelReports, wheelSteps } from "./terminalWheel";
 
 const FONT = '"JetBrains Mono", Menlo, monospace';
 const RESET = [0x1b, 0x63]; // ESC c: the daemon sends it before replaying a snapshot
@@ -77,6 +78,7 @@ export function TerminalView({
         fontSize,
         lineHeight: prefs.terminalLineHeight,
         scrollback: 10_000,
+        scrollSensitivity: prefs.terminalScrollSpeed,
         macOptionIsMeta: true,
         cursorBlink: prefs.cursorBlink,
         cursorStyle: prefs.cursorStyle,
@@ -156,7 +158,46 @@ export function TerminalView({
         term.focus();
       });
 
+      // Scroll speed for full-screen agents (see terminalWheel.ts). xterm doesn't expose which
+      // mouse encoding the agent chose, so follow mode 1006 (SGR) here; with any other
+      // encoding xterm keeps handling the wheel itself.
+      let sgrMouse = false;
+      const setMouseEncoding = (on: boolean) => (params: (number | number[])[]) => {
+        if (params.includes(1006)) sgrMouse = on;
+        return false; // xterm still applies the mode
+      };
+      const wheelCarry = { value: 0 };
+      term.attachCustomWheelEventHandler((ev) => {
+        const fullScreen = term.buffer.active.type === "alternate";
+        // X10 mode reports clicks only, not the wheel.
+        const reporting = term.modes.mouseTrackingMode !== "none" && term.modes.mouseTrackingMode !== "x10";
+        // xterm's own history: scrollSensitivity covers it.
+        if (!reporting && !fullScreen) return true;
+        if (reporting && !sgrMouse) return true;
+        const speed = getPrefs().terminalScrollSpeed;
+        if (speed === 1 && !ev.altKey && !ev.ctrlKey) return true; // xterm's own behaviour
+        const screen = term.element?.querySelector(".xterm-screen")?.getBoundingClientRect();
+        if (!screen || screen.height === 0 || screen.width === 0) return true;
+        ev.preventDefault();
+        const steps = wheelSteps(ev, screen.height / term.rows, speed, wheelCarry);
+        if (steps === 0) return false;
+        const clamp = (n: number, max: number) => Math.min(max, Math.max(1, n));
+        const col = clamp(Math.floor(((ev.clientX - screen.left) / screen.width) * term.cols) + 1, term.cols);
+        const row = clamp(Math.floor(((ev.clientY - screen.top) / screen.height) * term.rows) + 1, term.rows);
+        const data = reporting
+          ? sgrWheelReports(steps, col, row, ev)
+          : arrowKeys(steps, term.modes.applicationCursorKeysMode);
+        send(() => api.write(sessionId, data));
+        return false;
+      });
+
       const subs = [
+        term.parser.registerCsiHandler({ prefix: "?", final: "h" }, setMouseEncoding(true)),
+        term.parser.registerCsiHandler({ prefix: "?", final: "l" }, setMouseEncoding(false)),
+        term.parser.registerEscHandler({ final: "c" }, () => {
+          sgrMouse = false;
+          return false;
+        }),
         term.onData((d) => send(() => api.write(sessionId, d))),
         term.onBinary((d) =>
           send(() => api.writeBytes(sessionId, Array.from(d, (c) => c.charCodeAt(0) & 0xff))),
@@ -177,6 +218,7 @@ export function TerminalView({
           if (isReplay) {
             replaying++;
             term.reset();
+            sgrMouse = false;
             // The daemon follows the reset with the size the output was drawn at
             // (ESC [ 8 ; rows ; cols t). Replaying TUI output at any other size garbles it,
             // so the terminal takes that size before the output is written.
@@ -209,13 +251,14 @@ export function TerminalView({
         term.options.theme = terminalTheme();
       };
       window.addEventListener(THEME_EVENT, onTheme);
-      // Follow Settings → Terminal: font size, line height and cursor apply in place.
+      // Follow Settings → Terminal: font size, line height, cursor and scroll speed apply in place.
       const onPrefs = () => {
         const p = getPrefs();
         const size = sizeFor(p);
         const metricsChanged = term.options.fontSize !== size || term.options.lineHeight !== p.terminalLineHeight;
         term.options.cursorBlink = p.cursorBlink;
         term.options.cursorStyle = p.cursorStyle;
+        term.options.scrollSensitivity = p.terminalScrollSpeed;
         if (!metricsChanged) return;
         term.options.fontSize = size;
         term.options.lineHeight = p.terminalLineHeight;

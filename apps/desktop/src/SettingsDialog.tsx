@@ -12,6 +12,7 @@ import {
   DEFAULT_PREFS,
   FONT_SIZE_RANGE,
   LINE_HEIGHTS,
+  SCROLL_SPEEDS,
   setPrefs,
   usePrefs,
   type CursorStyle,
@@ -38,7 +39,7 @@ const SECTIONS: { id: SectionId; label: string; icon: Parameters<typeof Icon>[0]
   { id: "general", label: "General", icon: "sliders", desc: "How new sessions start, and the background service." },
   { id: "notifications", label: "Notifications", icon: "bell", desc: "When Termlab gets your attention." },
   { id: "appearance", label: "Appearance", icon: "palette", desc: "Colours for the app and its terminals, and the sidebar extras." },
-  { id: "terminal", label: "Terminal", icon: "terminal", desc: "Text and cursor in every session's terminal." },
+  { id: "terminal", label: "Terminal", icon: "terminal", desc: "Text, cursor and scrolling in every session's terminal." },
   { id: "agents", label: "Agents", icon: "bot", desc: "The coding agents Termlab found on this computer." },
   { id: "shortcuts", label: "Shortcuts", icon: "keyboard", desc: "Keyboard shortcuts, and the keys that trigger them." },
   { id: "about", label: "About", icon: "info", desc: "Version and updates." },
@@ -337,7 +338,8 @@ function TerminalSection() {
     prefs.terminalFontSize === DEFAULT_PREFS.terminalFontSize &&
     prefs.terminalLineHeight === DEFAULT_PREFS.terminalLineHeight &&
     prefs.cursorStyle === DEFAULT_PREFS.cursorStyle &&
-    prefs.cursorBlink === DEFAULT_PREFS.cursorBlink;
+    prefs.cursorBlink === DEFAULT_PREFS.cursorBlink &&
+    prefs.terminalScrollSpeed === DEFAULT_PREFS.terminalScrollSpeed;
   return (
     <>
       <TerminalPreview />
@@ -385,6 +387,16 @@ function TerminalSection() {
         </Row>
         <SwitchRow title="Blink" checked={prefs.cursorBlink} onChange={(on) => setPrefs({ cursorBlink: on })} />
       </Group>
+      <Group title="Scrolling" note="Hold ⌥ Option (Alt) while scrolling to go five times faster still.">
+        <Row title="Scroll speed" labelId="st-scroll" desc="Mouse wheel and trackpad">
+          <Segmented
+            labelledBy="st-scroll"
+            value={prefs.terminalScrollSpeed}
+            options={SCROLL_SPEEDS}
+            onChange={(v) => setPrefs({ terminalScrollSpeed: v })}
+          />
+        </Row>
+      </Group>
       <div>
         <button
           className="btn"
@@ -395,6 +407,7 @@ function TerminalSection() {
               terminalLineHeight: DEFAULT_PREFS.terminalLineHeight,
               cursorStyle: DEFAULT_PREFS.cursorStyle,
               cursorBlink: DEFAULT_PREFS.cursorBlink,
+              terminalScrollSpeed: DEFAULT_PREFS.terminalScrollSpeed,
             })
           }
         >
