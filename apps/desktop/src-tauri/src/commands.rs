@@ -182,14 +182,15 @@ pub async fn set_system_volume(volume: f64) -> CmdResult<()> {
     Ok(())
 }
 
-/// Opens a web link in the user's default browser. Only plain https links.
+/// Opens a web link in the user's default browser. Only plain http(s) links: the terminal
+/// opens links agents print, and dev servers print http://localhost ones.
 #[tauri::command]
 pub fn open_external(url: String) -> CmdResult<()> {
-    let ok = url.starts_with("https://")
+    let ok = (url.starts_with("https://") || url.starts_with("http://"))
         && url.len() < 2048
         && !url.chars().any(|c| c.is_control() || c.is_whitespace());
     if !ok {
-        return Err("only https links can be opened".into());
+        return Err("only http and https links can be opened".into());
     }
     open_url(&url).map_err(|e| format!("couldn't open the link: {e}"))
 }

@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { api, type AgentId } from "./api";
 import { THEME_EVENT, terminalTheme } from "./themes";
@@ -35,6 +36,19 @@ const CTRL_V_IMAGE_AGENTS = new Set<AgentId>(["codex", "vibe", "antigravity"]);
 function isImageOnlyPaste(data: DataTransfer): boolean {
   const hasImage = Array.from(data.items).some((i) => i.kind === "file" && i.type.startsWith("image/"));
   return hasImage && data.getData("text/plain") === "";
+}
+
+const IS_MAC = /Mac/.test(navigator.platform);
+
+/**
+ * ⌘-click (Ctrl-click off macOS) opens a link in the default browser, as in Terminal, iTerm
+ * and VS Code. xterm's own fallback (`confirm` + `window.open`) does nothing in the app's web
+ * view, so both printed URLs and OSC 8 hyperlinks go through here.
+ */
+function openTerminalLink(event: MouseEvent, uri: string) {
+  if (!(IS_MAC ? event.metaKey : event.ctrlKey)) return;
+  event.preventDefault();
+  void api.openExternal(uri).catch(() => {});
 }
 
 /**
@@ -84,9 +98,13 @@ export function TerminalView({
         cursorStyle: prefs.cursorStyle,
         allowProposedApi: false,
         theme: terminalTheme(),
+        // OSC 8 hyperlinks (Claude Code and others print links this way).
+        linkHandler: { activate: (event, text) => openTerminalLink(event, text) },
       });
       const fit = new FitAddon();
       term.loadAddon(fit);
+      // Plain URLs in the output, including ones wrapped across lines.
+      term.loadAddon(new WebLinksAddon(openTerminalLink));
       term.open(el);
       try {
         const webgl = new WebglAddon();
