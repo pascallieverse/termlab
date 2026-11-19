@@ -230,6 +230,23 @@ export interface DaemonStatus {
   outdated?: boolean;
 }
 
+/** Remote access: this computer linked to an ExampleLab account (see termlabd's remote.rs). */
+export type RemoteState = "unpaired" | "connecting" | "connected" | "no_plan" | "error";
+
+export interface RemoteStatus {
+  state: RemoteState;
+  serverUrl: string | null;
+  machineName: string | null;
+  accountName: string | null;
+  plan: string | null;
+  error: string | null;
+  /** Sessions this computer currently shows remotely. */
+  sessions: number;
+  /** Browsers watching a terminal right now. */
+  viewers: number;
+  defaultMachineName: string;
+}
+
 function call<T>(method: string, params?: unknown): Promise<T> {
   const request = params === undefined ? { method } : { method, params };
   return invoke<T>("daemon_call", { request });
@@ -325,6 +342,10 @@ export const api = {
   setSystemVolume: (volume: number) => invoke<null>("set_system_volume", { volume }),
   /** Opens an https link in the user's browser. */
   openExternal: (url: string) => invoke<null>("open_external", { url }),
+  remoteStatus: () => call<RemoteStatus>("remoteStatus"),
+  remotePair: (serverUrl: string, code: string, machineName: string) =>
+    call<RemoteStatus>("remotePair", { request: { serverUrl, code, machineName } }),
+  remoteUnpair: () => call<RemoteStatus>("remoteUnpair"),
   updateCheck: () => invoke<UpdateCheck>("update_check"),
   updateInstall: () => invoke<null>("update_install"),
   openInTerminal: (cwd: string, command: string) =>

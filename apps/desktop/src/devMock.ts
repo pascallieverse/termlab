@@ -126,6 +126,19 @@ const SCREEN =
   "\x1b[90m● Bash npm test -- billing\x1b[0m\r\n   \x1b[32m✓ 41 passed · 0 failed (3.8s)\x1b[0m\r\n\r\n" +
   "\x1b[33m Do you want to proceed?\x1b[0m\r\n ❯ 1. Yes\r\n   2. Yes, and don't ask again for psql commands\r\n   3. No\r\n";
 
+const REMOTE_UNPAIRED = {
+  state: "unpaired",
+  serverUrl: null,
+  machineName: null,
+  accountName: null,
+  plan: null,
+  error: null,
+  sessions: 0,
+  viewers: 0,
+  defaultMachineName: "Demo MacBook Pro",
+};
+let remote: Record<string, unknown> = { ...REMOTE_UNPAIRED };
+
 export function install() {
   const envFiles = new Map<string, string>();
   mockWindows("main");
@@ -156,6 +169,16 @@ export function install() {
       const req = a.request as { method: string; params?: Record<string, unknown> };
       const id = req.params?.id as string | undefined;
       switch (req.method) {
+        case "remoteStatus": return { ...remote };
+        case "remotePair": {
+          const r = req.params?.request as { serverUrl: string; code: string; machineName: string };
+          if (r.code.replace(/[^A-Z0-9]/gi, "").length !== 8) throw "This pairing code is not valid or has expired.";
+          remote = { ...remote, state: "connected", serverUrl: r.serverUrl, machineName: r.machineName, accountName: "Alex Rivera", plan: "remote", sessions: 6, viewers: 0 };
+          return { ...remote };
+        }
+        case "remoteUnpair":
+          remote = { ...REMOTE_UNPAIRED };
+          return { ...remote };
         case "listFolders": return [...folders];
         case "moveFolder": {
           const source = folders.findIndex((f) => f.id === req.params?.id);

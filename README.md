@@ -58,6 +58,10 @@ Agents without hooks get their status from the terminal screen instead.
   (for API-key billing), changed files, a diff view and a timeline of prompts and tool calls.
 - **Subagents.** See an agent's running subagents (test runners, explorers, reviewers) under
   its session.
+- **Remote access (paid).** Link Termlab to an ExampleLab account in Settings › Remote access
+  to watch sessions, answer approvals and type into terminals from a browser or your phone,
+  and to send webhooks when sessions change. The background service keeps the link up with
+  the window closed.
 - **Plan usage.** Your Claude and Codex plan limits in the header, so you know how much of the
   week is left.
 - **Resume, fork and hand off.** Pick up an earlier session, branch it, or hand the task to a

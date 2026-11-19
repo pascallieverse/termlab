@@ -5,6 +5,9 @@
 //! and on `<data-dir>/hook.sock` for `termlab-hook` (on Windows: named pipes derived from
 //! those paths). Exits on SIGTERM/SIGINT (saving every session's output first), on an app's
 //! `Shutdown` request, or after ten idle minutes with no sessions and no app connected.
+//! While the computer is paired for remote access it stays up, so phones can reach it.
+
+mod remote;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,6 +17,7 @@ use std::time::Duration;
 use anyhow::Context;
 use termlab_core::env::UserEnv;
 use termlab_core::ipc::Server;
+use termlab_core::remote::RemoteControl;
 use termlab_core::{DataDirs, Termlab, TermlabConfig};
 
 const IDLE_EXIT: Duration = Duration::from_secs(10 * 60);
@@ -37,6 +41,9 @@ fn main() -> anyhow::Result<()> {
     };
     std::fs::create_dir_all(&dirs.root)?;
     init_logging(&dirs)?;
+
+    // TLS for remote access (reqwest and the websocket) uses ring.
+    let _ = rustls::crypto::ring::default_provider().install_default();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -92,6 +99,10 @@ async fn run(dirs: DataDirs) -> anyhow::Result<()> {
     }
 
     let server = Server::new(tl.clone());
+    let bridge = remote::Bridge::new(tl.clone(), &dirs).context("setting up remote access")?;
+    let remote: Arc<dyn RemoteControl> = Arc::new(remote::RemoteHandle(bridge.clone()));
+    let _ = server.remote.set(remote.clone());
+    bridge.start();
     tracing::info!(pid = std::process::id(), socket = %socket.display(), "termlabd started");
     {
         let server = server.clone();
@@ -107,7 +118,7 @@ async fn run(dirs: DataDirs) -> anyhow::Result<()> {
         _ = terminated() => tracing::info!("SIGTERM"),
         _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT"),
         _ = server.shutdown.notified() => tracing::info!("shutdown requested by the app"),
-        _ = idle_watch(server.clone()) => tracing::info!("idle with no sessions or clients; exiting"),
+        _ = idle_watch(server.clone(), remote) => tracing::info!("idle with no sessions or clients; exiting"),
     }
     let tl2 = tl.clone();
     tokio::task::spawn_blocking(move || tl2.shutdown()).await?;
@@ -131,12 +142,15 @@ async fn terminated() {
     std::future::pending::<()>().await;
 }
 
-async fn idle_watch(server: Arc<Server>) {
+async fn idle_watch(server: Arc<Server>, remote: Arc<dyn RemoteControl>) {
     let mut idle_for = Duration::ZERO;
     let step = Duration::from_secs(30);
     loop {
         tokio::time::sleep(step).await;
-        if server.tl.live_count() == 0 && server.clients.load(Ordering::SeqCst) == 0 {
+        if server.tl.live_count() == 0
+            && server.clients.load(Ordering::SeqCst) == 0
+            && !remote.keeps_alive()
+        {
             idle_for += step;
             if idle_for >= IDLE_EXIT {
                 return;

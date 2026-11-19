@@ -1,4 +1,4 @@
-// Settings: a sidebar of sections (General, Notifications, Appearance, Terminal, Agents,
+// Settings: a sidebar of sections (General, Notifications, Remote access, Appearance, Terminal, Agents,
 // Shortcuts, About). Every choice applies at once; there is nothing to save.
 
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
@@ -7,6 +7,7 @@ import { PERMISSIONS, defaultPermission, setDefaultPermission } from "./agents";
 import type { PermissionPreset } from "./api";
 import { animeArtEnabled, setAnimeArtEnabled } from "./AnimeCard";
 import { Dialog } from "./Dialog";
+import { RemoteSection } from "./RemoteSection";
 import { musicEnabled, setMusicEnabled } from "./MusicCard";
 import {
   DEFAULT_PREFS,
@@ -33,11 +34,12 @@ import {
   useBindings,
 } from "./shortcuts";
 
-type SectionId = "general" | "notifications" | "appearance" | "terminal" | "agents" | "shortcuts" | "about";
+type SectionId = "general" | "notifications" | "remote" | "appearance" | "terminal" | "agents" | "shortcuts" | "about";
 
 const SECTIONS: { id: SectionId; label: string; icon: Parameters<typeof Icon>[0]["name"]; desc: string }[] = [
   { id: "general", label: "General", icon: "sliders", desc: "How new sessions start, and the background service." },
   { id: "notifications", label: "Notifications", icon: "bell", desc: "When Termlab gets your attention." },
+  { id: "remote", label: "Remote access", icon: "globe", desc: "Watch and answer these sessions from a browser or your phone." },
   { id: "appearance", label: "Appearance", icon: "palette", desc: "Colours for the app and its terminals, and the sidebar extras." },
   { id: "terminal", label: "Terminal", icon: "terminal", desc: "Text, cursor and scrolling in every session's terminal." },
   { id: "agents", label: "Agents", icon: "bot", desc: "The coding agents Termlab found on this computer." },
@@ -136,6 +138,7 @@ export function SettingsDialog() {
           <div key={section} id="st-panel" role="tabpanel" aria-labelledby={`st-tab-${section}`} className="settings-content">
             {section === "general" && <GeneralSection />}
             {section === "notifications" && <NotificationsSection />}
+            {section === "remote" && <RemoteSection Group={Group} Row={Row} />}
             {section === "appearance" && <AppearanceSection />}
             {section === "terminal" && <TerminalSection />}
             {section === "agents" && <AgentsSection />}

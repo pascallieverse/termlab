@@ -10,6 +10,7 @@ pub mod hooks;
 pub mod ipc;
 pub mod model;
 pub mod pty;
+pub mod remote;
 pub mod scrollback;
 pub mod service;
 pub mod status;

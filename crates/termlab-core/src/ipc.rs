@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -28,11 +28,13 @@ use crate::adapter::PastSession;
 use crate::error::CoreError;
 use crate::model::{AgentId, ApprovalChoice, FolderId, PermissionPreset, SessionId, TermSize};
 use crate::pty::PtyEvent;
+use crate::remote::{PairRequest, RemoteControl};
 use crate::service::{CoreEvent, StartRequest, Termlab};
 use crate::transport::{self, Conn};
 
 /// 2: discovery everywhere, import, external sessions and attach.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// 3: remote access (`RemoteStatus`, `RemotePair`, `RemoteUnpair`).
+pub const PROTOCOL_VERSION: u32 = 3;
 /// A call with no reply in this long fails instead of hanging the caller.
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const KIND_JSON: u8 = 1;
@@ -194,6 +196,14 @@ pub enum Request {
     Shutdown {
         force: bool,
     },
+    /// Remote access: whether this computer is linked to an ExampleLab account.
+    RemoteStatus,
+    /// Links this computer with a pairing code from the ExampleLab dashboard.
+    RemotePair {
+        request: PairRequest,
+    },
+    /// Unlinks this computer.
+    RemoteUnpair,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -282,6 +292,8 @@ pub struct Server {
     pub clients: AtomicUsize,
     /// Fired when a client asks the daemon to stop.
     pub shutdown: tokio::sync::Notify,
+    /// Remote access, when the daemon offers it.
+    pub remote: OnceLock<Arc<dyn RemoteControl>>,
 }
 
 impl Server {
@@ -291,6 +303,7 @@ impl Server {
             started_at: crate::model::now_ms(),
             clients: AtomicUsize::new(0),
             shutdown: tokio::sync::Notify::new(),
+            remote: OnceLock::new(),
         })
     }
 
@@ -391,6 +404,24 @@ impl Server {
                         Err(format!("{live} sessions are running"))
                     };
                     let _ = tx.send(json_frame(&reply_msg(id, reply))).await;
+                }
+                req @ (Request::RemoteStatus
+                | Request::RemotePair { .. }
+                | Request::RemoteUnpair) => {
+                    let remote = self.remote.get().cloned();
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        let reply = match remote {
+                            None => Err("Remote access isn't available in this build.".to_string()),
+                            Some(r) => match req {
+                                Request::RemotePair { request } => r.pair(request).await,
+                                Request::RemoteUnpair => r.unpair().await,
+                                _ => Ok(r.status()),
+                            }
+                            .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+                        };
+                        let _ = tx.send(json_frame(&reply_msg(id, reply))).await;
+                    });
                 }
                 Request::Hello { .. } => {
                     let info = DaemonInfo {
@@ -517,9 +548,13 @@ pub fn dispatch(tl: &Arc<Termlab>, req: Request) -> Result<Value, String> {
             agent_session_id,
             size,
         } => to_value(tl.attach_external(agent, &agent_session_id, size)),
-        Hello { .. } | Attach { .. } | Detach { .. } | Shutdown { .. } => {
-            Err("handled by the connection".into())
-        }
+        Hello { .. }
+        | Attach { .. }
+        | Detach { .. }
+        | Shutdown { .. }
+        | RemoteStatus
+        | RemotePair { .. }
+        | RemoteUnpair => Err("handled by the connection".into()),
     }
 }
 
