@@ -4502,7 +4502,7 @@ dependencies = [
 
 [[package]]
 name = "termlab-core"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "bytes",
  "directories",
@@ -4522,7 +4522,7 @@ dependencies = [
 
 [[package]]
 name = "termlab-desktop"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "serde",
@@ -4541,11 +4541,11 @@ dependencies = [
 
 [[package]]
 name = "termlab-hook"
-version = "0.2.5"
+version = "0.2.6"
 
 [[package]]
 name = "termlabd"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
