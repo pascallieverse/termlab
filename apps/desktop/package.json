@@ -2,6 +2,7 @@
   "name": "termlab-desktop",
   "private": true,
   "version": "0.2.5",
+  "license": "FSL-1.1-ALv2",
   "type": "module",
   "scripts": {
     "dev": "vite",

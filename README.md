@@ -223,3 +223,12 @@ npm run screenshots
 
 To change what they show, edit the sample data in `devMock.ts` or the steps in
 `scripts/screenshots.mjs`.
+
+## License
+
+Termlab is source-available under the [Functional Source License, Version 1.1, ALv2 Future
+License](LICENSE.md) (FSL-1.1-ALv2). You may use, modify and redistribute it for any purpose
+except offering a competing product or service. Each release becomes available under the
+Apache License 2.0 two years after it was published.
+
+Remote access is a paid service run by ExampleLab; the server is not part of this repository.
