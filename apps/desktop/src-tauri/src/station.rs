@@ -183,7 +183,11 @@ pub fn protocol<R: tauri::Runtime>(
 ) -> tauri::http::Response<Vec<u8>> {
     let src = Url::parse(&request.uri().to_string())
         .ok()
-        .and_then(|u| u.query_pairs().find(|(k, _)| k == "src").map(|(_, v)| v.into_owned()))
+        .and_then(|u| {
+            u.query_pairs()
+                .find(|(k, _)| k == "src")
+                .map(|(_, v)| v.into_owned())
+        })
         .and_then(|s| player_src(&s).ok());
     let response = tauri::http::Response::builder();
     match src {
@@ -260,7 +264,12 @@ pub async fn station_place(app: AppHandle, rect: Option<DockRect>) -> CmdResult<
             // Page coordinates and the window's content view don't share an origin: see
             // `page_origin`.
             let (dx, dy) = page_origin(&app).await;
-            Some([(rect.x + dx).max(0.0), (rect.y + dy).max(0.0), rect.width, rect.height])
+            Some([
+                (rect.x + dx).max(0.0),
+                (rect.y + dy).max(0.0),
+                rect.width,
+                rect.height,
+            ])
         }
         None => None,
     };
@@ -350,6 +359,8 @@ mod tests {
     #[test]
     fn page_quotes_the_address() {
         let html = page_html("https://www.youtube-nocookie.com/embed/x?a=1&b=\"><script>");
-        assert!(html.contains("src=\"https://www.youtube-nocookie.com/embed/x?a=1&amp;b=&quot;&gt;&lt;script&gt;\""));
+        assert!(html.contains(
+            "src=\"https://www.youtube-nocookie.com/embed/x?a=1&amp;b=&quot;&gt;&lt;script&gt;\""
+        ));
     }
 }
