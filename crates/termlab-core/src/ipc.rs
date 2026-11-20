@@ -196,9 +196,9 @@ pub enum Request {
     Shutdown {
         force: bool,
     },
-    /// Remote access: whether this computer is linked to an ExampleLab account.
+    /// Remote access: whether this computer is linked to a Termlab server.
     RemoteStatus,
-    /// Links this computer with a pairing code from the ExampleLab dashboard.
+    /// Links this computer with a pairing code from that server's Machines page.
     RemotePair {
         request: PairRequest,
     },

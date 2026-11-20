@@ -621,7 +621,7 @@ impl Bridge {
         }
         if let Some(cfg) = paired {
             // Best effort: the server forgets this computer too.
-            let _ = tokio::time::timeout(
+            let sent = tokio::time::timeout(
                 Duration::from_secs(5),
                 self.http
                     .delete(format!("{}/api/machine", cfg.server_url))
@@ -629,6 +629,16 @@ impl Bridge {
                     .send(),
             )
             .await;
+            match sent {
+                Ok(Ok(r)) if r.status().is_success() || r.status().as_u16() == 401 => {}
+                Ok(Ok(r)) => {
+                    tracing::warn!(status = %r.status(), "remote: the server refused the unlink")
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "remote: couldn't reach the server to unlink")
+                }
+                Err(_) => tracing::warn!("remote: the server didn't answer the unlink in time"),
+            }
         }
         self.forget();
         self.set_state(RemoteState::Unpaired, None);

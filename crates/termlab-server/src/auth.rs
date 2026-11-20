@@ -260,13 +260,18 @@ pub fn user_agent(headers: &HeaderMap) -> String {
 
 /// Refuses state-changing browser requests without the CSRF header. The machine API uses a
 /// bearer token, not cookies, so it doesn't need it.
+/// Calls Termlab makes (bearer token or pairing code, no cookie) don't carry the header.
+fn csrf_exempt(path: &str) -> bool {
+    path == "/api/pair" || path == "/api/machine" || path.starts_with("/api/machine/")
+}
+
 pub async fn csrf_guard(
     State(_app): State<AppRef>,
     req: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
     let path = req.uri().path();
-    let exempt = path == "/api/pair" || path.starts_with("/api/machine/");
+    let exempt = csrf_exempt(path);
     let safe = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
     if path.starts_with("/api/") && !exempt && !safe {
         let ok = req
@@ -317,6 +322,16 @@ impl LoginLimiter {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn machine_calls_skip_the_csrf_header() {
+        assert!(csrf_exempt("/api/pair"));
+        assert!(csrf_exempt("/api/machine"));
+        assert!(csrf_exempt("/api/machine/ws"));
+        assert!(!csrf_exempt("/api/machines"));
+        assert!(!csrf_exempt("/api/machines/1"));
+        assert!(!csrf_exempt("/api/login"));
+    }
     use super::*;
 
     #[test]

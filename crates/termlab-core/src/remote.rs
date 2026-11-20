@@ -15,13 +15,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteState {
-    /// Not linked to an account.
+    /// Not linked to a server.
     Unpaired,
     /// Linked, (re)connecting to the server.
     Connecting,
     /// Linked and live: sessions are visible remotely.
     Connected,
-    /// Linked, but the account has no plan with remote access.
+    /// Linked, but the server refuses this computer (kept for older servers).
     NoPlan,
     /// Linked, but the last attempt failed; it retries by itself.
     Error,
