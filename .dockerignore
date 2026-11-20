@@ -1,0 +1,8 @@
+target
+**/node_modules
+**/dist
+apps/desktop/src-tauri/binaries
+apps/desktop/src-tauri/gen
+docs/screenshots
+design
+.git

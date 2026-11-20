@@ -230,7 +230,7 @@ export interface DaemonStatus {
   outdated?: boolean;
 }
 
-/** Remote access: this computer linked to an ExampleLab account (see termlabd's remote.rs). */
+/** Remote access: this computer linked to your own Termlab server (see termlabd's remote.rs). */
 export type RemoteState = "unpaired" | "connecting" | "connected" | "no_plan" | "error";
 
 export interface RemoteStatus {

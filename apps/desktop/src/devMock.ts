@@ -173,7 +173,7 @@ export function install() {
         case "remotePair": {
           const r = req.params?.request as { serverUrl: string; code: string; machineName: string };
           if (r.code.replace(/[^A-Z0-9]/gi, "").length !== 8) throw "This pairing code is not valid or has expired.";
-          remote = { ...remote, state: "connected", serverUrl: r.serverUrl, machineName: r.machineName, accountName: "Alex Rivera", plan: "remote", sessions: 6, viewers: 0 };
+          remote = { ...remote, state: "connected", serverUrl: r.serverUrl, machineName: r.machineName, accountName: "My Termlab Server", plan: null, sessions: 6, viewers: 0 };
           return { ...remote };
         }
         case "remoteUnpair":

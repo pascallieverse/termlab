@@ -1,0 +1,42 @@
+[package]
+name = "termlab-server"
+description = "Self-hosted Termlab server: remote access to your own Termlab computers, and webhooks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1"
+argon2 = { version = "0.5", features = ["std"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+base64 = "0.23"
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+hex = "0.4"
+hmac = "0.12"
+mime_guess = "2"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+rand = "0.8"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "http2"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "net", "sync"] }
+totp-rs = { version = "5", default-features = false, features = ["otpauth", "gen_secret"] }
+tower-http = { version = "0.6", features = ["limit"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+web-push-native = "0.5"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

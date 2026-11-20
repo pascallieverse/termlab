@@ -1,5 +1,6 @@
-//! Remote access: the link between this computer's sessions and an ExampleLab account, so
-//! they can be watched and answered from a browser or phone.
+//! Remote access: the link between this computer's sessions and the owner's own, self-hosted
+//! Termlab server (`termlab-server`), so they can be watched and answered from a browser or
+//! phone.
 //!
 //! The bridge itself (HTTP and websocket client) lives in `termlabd`, which is the only
 //! process that needs network access. This module holds what the IPC protocol shares with
@@ -31,9 +32,10 @@ pub enum RemoteState {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteStatus {
     pub state: RemoteState,
-    /// The ExampleLab server, e.g. `https://examplelab.com`.
+    /// The Termlab server, e.g. `https://remote.example.com`.
     pub server_url: Option<String>,
     pub machine_name: Option<String>,
+    /// The server's name, as it reported it when pairing.
     pub account_name: Option<String>,
     pub plan: Option<String>,
     /// Why the last attempt failed, in words for the user.

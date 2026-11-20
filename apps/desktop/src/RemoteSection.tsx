@@ -1,18 +1,19 @@
-// Settings › Remote access: link this computer to an ExampleLab account so its sessions
-// can be watched and answered from a browser or phone. The background service holds the
-// link (it keeps working with the window closed); this only shows and changes it.
+// Settings › Remote access: link this computer to your own Termlab server (termlab-server,
+// self-hosted) so its sessions can be watched and answered from a browser or phone. The
+// background service holds the link (it keeps working with the window closed); this only
+// shows and changes it.
 
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { api, type RemoteStatus } from "./api";
 
-/** The ExampleLab server new links go to. Editable in the form. */
-export const DEFAULT_REMOTE_SERVER = "https://examplelab.com";
+/** How to run a Termlab server. */
+export const SELF_HOSTING_GUIDE = "https://github.com/pascallieverse/termlab/blob/main/docs/self-hosting.md";
 
 const STATE_TEXT: Record<RemoteStatus["state"], { label: string; dot: string }> = {
   unpaired: { label: "Not linked", dot: "" },
   connecting: { label: "Connecting…", dot: "" },
   connected: { label: "Connected", dot: " ok" },
-  no_plan: { label: "No remote plan", dot: " bad" },
+  no_plan: { label: "Not allowed", dot: " bad" },
   error: { label: "Can't connect", dot: " bad" },
 };
 
@@ -72,7 +73,7 @@ function LinkForm({
   onLinked(s: RemoteStatus): void;
   Group: (p: { title: string; note?: ReactNode; children: ReactNode }) => ReactNode;
 }) {
-  const [server, setServer] = useState(DEFAULT_REMOTE_SERVER);
+  const [server, setServer] = useState("");
   const [code, setCode] = useState("");
   const [name, setName] = useState(status.defaultMachineName);
   const [busy, setBusy] = useState(false);
@@ -91,53 +92,56 @@ function LinkForm({
     }
   }
 
-  const dashboard = `${server.replace(/\/+$/, "") || DEFAULT_REMOTE_SERVER}/dashboard`;
 
   return (
     <Group
       title="Link this computer"
       note={
         <>
-          Termlab sends session status, approval prompts and a few preview lines. Terminal output and
-          your keystrokes only travel while you have that terminal open in a browser, and aren't stored.
+          Termlab sends session status, approval prompts and a few preview lines to your server.
+          Terminal output and your keystrokes only travel while you have that terminal open in a
+          browser, and aren't stored. Use https:// for a server on the internet.
         </>
       }
     >
       <form className="settings-block" onSubmit={submit}>
         {status.error && <p className="settings-warning">{status.error}</p>}
         <p className="muted small" style={{ margin: 0, lineHeight: 1.5 }}>
-          With a Remote plan you can watch and answer this computer's sessions from a browser or your
-          phone. In your ExampleLab dashboard, click <strong>Pair a machine</strong> and enter the code here.{" "}
-          <button type="button" className="link-btn small" onClick={() => void api.openExternal(dashboard).catch(() => {})}>
-            Open the dashboard
+          Watch and answer this computer's sessions from a browser or your phone, through your own
+          Termlab server on a small VPS. Nothing goes through anyone else. On your server, open{" "}
+          <strong>Machines › Pair a machine</strong> and enter its address and the code here.{" "}
+          <button type="button" className="link-btn small" onClick={() => void api.openExternal(SELF_HOSTING_GUIDE).catch(() => {})}>
+            How to set up a server
           </button>
         </p>
         <label className="field">
-          <span className="label">Pairing code</span>
+          <span className="label">Your Termlab server</span>
           <input
             className="input mono"
-            value={code}
-            onChange={(e) => setCode(e.target.value.toUpperCase())}
-            placeholder="K7QX-2MPD"
-            autoComplete="off"
+            value={server}
+            onChange={(e) => setServer(e.target.value)}
+            placeholder="https://remote.example.com"
+            autoComplete="url"
             spellCheck={false}
             required
           />
         </label>
         <div className="two-col">
           <label className="field">
-            <span className="label">Name for this computer</span>
-            <input className="input" value={name} onChange={(e) => setName(e.target.value)} required />
-          </label>
-          <label className="field">
-            <span className="label">ExampleLab server</span>
+            <span className="label">Pairing code</span>
             <input
               className="input mono"
-              value={server}
-              onChange={(e) => setServer(e.target.value)}
+              value={code}
+              onChange={(e) => setCode(e.target.value.toUpperCase())}
+              placeholder="K7QX-2MPD"
+              autoComplete="off"
               spellCheck={false}
               required
             />
+          </label>
+          <label className="field">
+            <span className="label">Name for this computer</span>
+            <input className="input" value={name} onChange={(e) => setName(e.target.value)} required />
           </label>
         </div>
         {error && (
@@ -146,7 +150,7 @@ function LinkForm({
           </p>
         )}
         <div>
-          <button className="btn primary" type="submit" disabled={busy || !code.trim()}>
+          <button className="btn primary" type="submit" disabled={busy || !code.trim() || !server.trim()}>
             {busy ? "Linking…" : "Link this computer"}
           </button>
         </div>
@@ -170,7 +174,7 @@ function Linked({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const state = STATE_TEXT[status.state];
-  const server = status.serverUrl ?? DEFAULT_REMOTE_SERVER;
+  const server = status.serverUrl ?? "";
 
   async function unlink() {
     setBusy(true);
@@ -203,13 +207,13 @@ function Linked({
           desc={desc}
         >
           <button className="btn small" onClick={() => void api.openExternal(`${server}/remote`).catch(() => {})}>
-            Open Termlab Remote
+            Open your server
           </button>
         </Row>
-        <Row title="Account" desc={`${status.accountName ?? "—"}${status.plan ? ` · ${status.plan} plan` : ""}`} />
-        <Row title="This computer" desc={`${status.machineName ?? "—"} · ${server}`} />
+        <Row title="Server" desc={`${status.accountName ?? "Termlab server"} · ${server}`} />
+        <Row title="This computer" desc={status.machineName ?? "—"} />
       </Group>
-      <Group title="Unlink" note="The computer disappears from your ExampleLab dashboard. Sessions here keep running.">
+      <Group title="Unlink" note="The computer disappears from your server's Machines list. Sessions here keep running.">
         <Row
           title={confirm ? "Unlink this computer?" : "Stop sharing this computer"}
           desc={confirm ? "You can link it again later with a new pairing code." : undefined}

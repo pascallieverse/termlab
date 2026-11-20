@@ -58,10 +58,11 @@ Agents without hooks get their status from the terminal screen instead.
   (for API-key billing), changed files, a diff view and a timeline of prompts and tool calls.
 - **Subagents.** See an agent's running subagents (test runners, explorers, reviewers) under
   its session.
-- **Remote access (paid).** Link Termlab to an ExampleLab account in Settings › Remote access
-  to watch sessions, answer approvals and type into terminals from a browser or your phone,
-  and to send webhooks when sessions change. The background service keeps the link up with
-  the window closed.
+- **Remote access, on your own server.** Run `termlab-server` on a small VPS and link Termlab
+  to it in Settings › Remote access, then watch sessions, answer approvals and type into
+  terminals from a browser or your phone, get push notifications, and send signed webhooks
+  when sessions change. Nothing goes through a third party. See
+  [docs/self-hosting.md](docs/self-hosting.md).
 - **Plan usage.** Your Claude and Codex plan limits in the header, so you know how much of the
   week is left.
 - **Resume, fork and hand off.** Pick up an earlier session, branch it, or hand the task to a
@@ -231,4 +232,4 @@ License](LICENSE.md) (FSL-1.1-ALv2). You may use, modify and redistribute it for
 except offering a competing product or service. Each release becomes available under the
 Apache License 2.0 two years after it was published.
 
-Remote access is a paid service run by ExampleLab; the server is not part of this repository.
+`termlab-server` (in `crates/termlab-server`) is part of Termlab and under the same license.

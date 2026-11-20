@@ -1,13 +1,14 @@
-//! The remote-access bridge: links this computer's sessions to an ExampleLab account.
+//! The remote-access bridge: links this computer's sessions to your own Termlab server
+//! (`termlab-server`, self-hosted).
 //!
-//! - Session state goes up over HTTPS (the device API); the server diffs it and fires
-//!   webhooks and phone notifications.
-//! - Commands (answer, message, stop, hold) come down on `private-machine.{id}`.
-//! - Terminal bytes go to browsers as client events on `presence-terminal.{session}`,
-//!   only while someone is watching. They pass through the websocket server, never PHP.
+//! One websocket to `/api/machine/ws` carries everything:
+//! - session state goes up (a snapshot, then each change, debounced); the server diffs it
+//!   and fires webhooks and phone notifications;
+//! - commands (answer, message, stop, hold) come down, audited by the server first;
+//! - a session's terminal streams only while someone watches it in a browser, and their
+//!   keystrokes come back.
 //!
-//! The websocket server (Laravel Reverb) speaks the Pusher protocol. The protocol is
-//! documented in the ExampleLab repository: `docs/termlab-remote-protocol.md`.
+//! The protocol is in `docs/server-protocol.md`.
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -30,10 +31,11 @@ use termlab_core::{CoreEvent, DataDirs, Termlab, git};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 const CONFIG_FILE: &str = "remote.json";
-const HEARTBEAT: Duration = Duration::from_secs(30);
-/// Pusher's activity timeout is 30 s on Reverb; ping a little more often.
+/// The server protocol this bridge speaks (docs/server-protocol.md).
+const PROTOCOL: u32 = 2;
 const PING: Duration = Duration::from_secs(25);
 /// A session that changes often is reported at most this often.
 const DEBOUNCE: Duration = Duration::from_millis(300);
@@ -42,41 +44,29 @@ const FLUSH_TICK: Duration = Duration::from_millis(150);
 const RECENT_MS: i64 = 48 * 3600 * 1000;
 const MAX_SESSIONS: usize = 200;
 const PREVIEW_LINES: usize = 12;
-/// Raw terminal bytes per websocket message. Base64 plus JSON stays under Reverb's
-/// default 10 KB message limit.
-const CHUNK: usize = 6 * 1024;
-const OUTPUT_BATCH: Duration = Duration::from_millis(40);
+/// Raw terminal bytes per output message (the server accepts up to 256 KB of base64).
+const CHUNK: usize = 48 * 1024;
+const OUTPUT_BATCH: Duration = Duration::from_millis(30);
 /// How much scrollback a viewer gets when they open a terminal.
 const SNAPSHOT_MAX: usize = 512 * 1024;
 const BRANCH_TTL: Duration = Duration::from_secs(60);
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Reverb {
-    key: String,
-    host: String,
-    port: u16,
-    scheme: String,
-    auth_endpoint: String,
-}
-
-/// What pairing returned; kept in `<data-dir>/remote.json`.
+/// What pairing returned; kept in `<data-dir>/remote.json` (mode 0600).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Paired {
+    #[serde(default)]
+    protocol: u32,
     server_url: String,
     token: String,
     machine_id: u64,
     machine_name: String,
-    account_name: Option<String>,
-    plan: Option<String>,
-    reverb: Reverb,
+    server_name: Option<String>,
 }
 
 enum Fail {
-    /// The token was revoked: the machine was removed in the dashboard.
+    /// The token was revoked: the computer was removed on the server.
     Revoked,
-    /// The account has no plan with remote access.
-    NoPlan,
     Other(String),
 }
 
@@ -110,7 +100,9 @@ impl Bridge {
         let path = dirs.root.join(CONFIG_FILE);
         let paired = std::fs::read(&path)
             .ok()
-            .and_then(|b| serde_json::from_slice::<Paired>(&b).ok());
+            .and_then(|b| serde_json::from_slice::<Paired>(&b).ok())
+            // A pairing from before protocol 2 (the hosted ExampleLab service) is dropped.
+            .filter(|p| p.protocol == PROTOCOL);
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             .connect_timeout(Duration::from_secs(10))
@@ -188,17 +180,9 @@ impl Bridge {
                     self.forget();
                     self.set_state(
                         RemoteState::Unpaired,
-                        Some("This computer was removed from your ExampleLab account.".into()),
+                        Some("This computer was removed on your Termlab server.".into()),
                     );
                     return;
-                }
-                Err(Fail::NoPlan) => {
-                    self.set_state(
-                        RemoteState::NoPlan,
-                        Some("Your ExampleLab account has no plan with remote access.".into()),
-                    );
-                    tokio::time::sleep(Duration::from_secs(300)).await;
-                    continue;
                 }
                 Err(Fail::Other(msg)) => {
                     tracing::warn!(error = %msg, "remote: connection failed");
@@ -217,92 +201,27 @@ impl Bridge {
         }
     }
 
-    // ---- HTTP ------------------------------------------------------------------------
-
-    async fn api(
-        &self,
-        cfg: &Paired,
-        method: reqwest::Method,
-        path: &str,
-        body: Option<Value>,
-    ) -> Result<Value, Fail> {
-        let mut req = self
-            .http
-            .request(method, format!("{}/api/v1{path}", cfg.server_url))
-            .bearer_auth(&cfg.token)
-            .header("Accept", "application/json");
-        if let Some(b) = body {
-            req = req.json(&b);
-        }
-        let res = req.send().await?;
-        let status = res.status();
-        let text = res.text().await.unwrap_or_default();
-        match status.as_u16() {
-            200..=299 => Ok(serde_json::from_str(&text).unwrap_or(Value::Null)),
-            401 => Err(Fail::Revoked),
-            402 => Err(Fail::NoPlan),
-            _ => Err(Fail::Other(server_message(status, &text))),
-        }
-    }
-
-    async fn heartbeat(&self, cfg: &Paired) -> Result<(), Fail> {
-        self.api(
-            cfg,
-            reqwest::Method::POST,
-            "/machine/heartbeat",
-            Some(json!({ "version": VERSION, "os": self.os })),
-        )
-        .await
-        .map(|_| ())
-    }
-
-    async fn channel_auth(
-        &self,
-        cfg: &Paired,
-        socket_id: &str,
-        channel: &str,
-    ) -> Result<Value, Fail> {
-        let res = self
-            .http
-            .post(&cfg.reverb.auth_endpoint)
-            .bearer_auth(&cfg.token)
-            .header("Accept", "application/json")
-            .json(&json!({ "socket_id": socket_id, "channel_name": channel }))
-            .send()
-            .await?;
-        match res.status().as_u16() {
-            200..=299 => Ok(res.json().await?),
-            401 => Err(Fail::Revoked),
-            402 => Err(Fail::NoPlan),
-            s => Err(Fail::Other(format!(
-                "websocket auth for {channel} failed ({s})"
-            ))),
-        }
-    }
-
     // ---- one connection ----------------------------------------------------------------
 
     async fn connect_once(self: &Arc<Self>, cfg: &Paired) -> Result<(), Fail> {
-        let me = self
-            .api(cfg, reqwest::Method::GET, "/machine", None)
-            .await?;
-        if me.get("remote").and_then(Value::as_bool) == Some(false) {
-            return Err(Fail::NoPlan);
-        }
-        self.heartbeat(cfg).await?;
-
-        let ws_url = format!(
-            "{}://{}:{}/app/{}?protocol=7&client=termlab&version={VERSION}&flash=false",
-            if cfg.reverb.scheme == "https" {
-                "wss"
-            } else {
-                "ws"
-            },
-            cfg.reverb.host,
-            cfg.reverb.port,
-            cfg.reverb.key
+        let url = ws_url(&cfg.server_url, "/api/machine/ws").ok_or_else(|| {
+            Fail::Other(format!("{} isn't a valid server address.", cfg.server_url))
+        })?;
+        let mut request = url
+            .as_str()
+            .into_client_request()
+            .map_err(|e| Fail::Other(format!("Bad server address: {e}")))?;
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {}", cfg.token)
+                .parse()
+                .map_err(|_| Fail::Other("Bad machine token.".into()))?,
         );
-        let connector = if cfg.reverb.scheme == "https" {
+        request.headers_mut().insert(
+            "user-agent",
+            format!("Termlab/{VERSION}").parse().expect("ascii"),
+        );
+        let connector = if url.scheme() == "wss" {
             use rustls_platform_verifier::ConfigVerifierExt;
             let tls = rustls::ClientConfig::with_platform_verifier()
                 .map_err(|e| Fail::Other(format!("TLS setup failed: {e}")))?;
@@ -311,54 +230,38 @@ impl Bridge {
             None
         };
         let (ws, _) =
-            tokio_tungstenite::connect_async_tls_with_config(&ws_url, None, false, connector)
+            tokio_tungstenite::connect_async_tls_with_config(request, None, false, connector)
                 .await
-                .map_err(|e| Fail::Other(format!("Couldn't open the live connection: {e}")))?;
+                .map_err(|e| match e {
+                    tokio_tungstenite::tungstenite::Error::Http(res)
+                        if res.status().as_u16() == 401 =>
+                    {
+                        Fail::Revoked
+                    }
+                    tokio_tungstenite::tungstenite::Error::Http(res) => Fail::Other(format!(
+                        "The server refused the connection ({}).",
+                        res.status()
+                    )),
+                    other => Fail::Other(format!("Couldn't reach the server: {other}")),
+                })?;
         let (mut sink, mut stream) = ws.split();
 
-        // The server says hello with our socket id.
-        let socket_id = loop {
-            let msg = tokio::time::timeout(Duration::from_secs(15), stream.next())
-                .await
-                .map_err(|_| Fail::Other("The live connection didn't answer.".into()))?;
-            let Some(Ok(Message::Text(text))) = msg else {
-                return Err(Fail::Other(
-                    "The live connection closed while connecting.".into(),
-                ));
-            };
-            let (event, _, data) = parse_frame(text.as_str());
-            if event == "pusher:connection_established" {
-                break data
-                    .get("socket_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-            }
-            if event == "pusher:error" {
-                return Err(Fail::Other(format!("Live connection refused: {data}")));
-            }
-        };
-
-        let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
-        let commands = format!("private-machine.{}", cfg.machine_id);
-        let auth = self.channel_auth(cfg, &socket_id, &commands).await?;
-        send(&mut sink, subscribe_frame(&commands, &auth)).await?;
-
-        let mut core_rx = self.tl.subscribe();
+        send(
+            &mut sink,
+            json!({ "type": "hello", "protocol": PROTOCOL, "version": VERSION, "os": self.os }),
+        )
+        .await?;
         let mut synced: HashSet<SessionId> = HashSet::new();
-        let mut viewers: HashMap<SessionId, HashSet<String>> = HashMap::new();
-        let mut forwarders: HashMap<SessionId, JoinHandle<()>> = HashMap::new();
-        let mut dirty: HashMap<SessionId, Instant> = HashMap::new();
-
-        self.full_sync(cfg, &socket_id, &mut sink, &mut synced)
-            .await?;
+        self.full_sync(&mut sink, &mut synced).await?;
         self.set_state(RemoteState::Connected, None);
         self.set_counts(synced.len(), 0);
         tracing::info!(sessions = synced.len(), "remote: connected");
 
+        let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
+        let mut core_rx = self.tl.subscribe();
+        let mut forwarders: HashMap<SessionId, JoinHandle<()>> = HashMap::new();
+        let mut dirty: HashMap<SessionId, Instant> = HashMap::new();
         let mut flush = tokio::time::interval(FLUSH_TICK);
-        let mut heartbeat = tokio::time::interval(HEARTBEAT);
-        heartbeat.reset();
         let mut ping = tokio::time::interval(PING);
         ping.reset();
 
@@ -370,43 +273,28 @@ impl Bridge {
                         Some(Ok(Message::Ping(p))) => { let _ = sink.send(Message::Pong(p)).await; continue }
                         Some(Ok(Message::Close(_))) | None => break Ok(()),
                         Some(Ok(_)) => continue,
-                        Some(Err(e)) => break Err(Fail::Other(format!("Live connection lost: {e}"))),
+                        Some(Err(e)) => break Err(Fail::Other(format!("Connection lost: {e}"))),
                     };
-                    let (event, channel, data) = parse_frame(&text);
-                    match event.as_str() {
-                        "pusher:ping" => send(&mut sink, json!({"event": "pusher:pong", "data": {}}).to_string()).await?,
-                        "pusher:error" => tracing::warn!(%data, "remote: server error"),
-                        "pusher_internal:subscription_succeeded" | "pusher_internal:member_added" | "pusher_internal:member_removed" => {
-                            if let Some(sid) = terminal_session(&channel) {
-                                let set = viewers.entry(sid).or_default();
-                                match event.as_str() {
-                                    "pusher_internal:subscription_succeeded" => {
-                                        set.clear();
-                                        if let Some(ids) = data.pointer("/presence/ids").and_then(Value::as_array) {
-                                            set.extend(ids.iter().filter_map(member_id).filter(|id| !id.starts_with("machine-")));
-                                        }
-                                    }
-                                    "pusher_internal:member_added" => {
-                                        if let Some(id) = data.get("user_id").and_then(member_id).filter(|id| !id.starts_with("machine-")) {
-                                            set.insert(id);
-                                        }
-                                    }
-                                    _ => {
-                                        if let Some(id) = data.get("user_id").and_then(member_id) {
-                                            set.remove(&id);
-                                        }
-                                    }
+                    let Ok(m) = serde_json::from_str::<Value>(&text) else { continue };
+                    let id = m["id"].as_str().and_then(|s| s.parse::<uuid::Uuid>().ok()).map(SessionId);
+                    match m["type"].as_str().unwrap_or("") {
+                        "command" => self.run_command(&m),
+                        "watch" => if let Some(id) = id {
+                            if m["on"].as_bool().unwrap_or(false) {
+                                // A (new) viewer: start over with a fresh snapshot.
+                                if let Some(f) = forwarders.remove(&id) { f.abort(); }
+                                if let Ok(att) = self.tl.attach(id) {
+                                    forwarders.insert(id, spawn_forwarder(self.tl.clone(), id, att, out_tx.clone()));
                                 }
-                                self.update_forwarder(sid, &viewers, &mut forwarders, &out_tx);
-                                self.set_counts(synced.len(), viewers.values().map(HashSet::len).sum());
+                            } else if let Some(f) = forwarders.remove(&id) {
+                                f.abort();
                             }
-                        }
-                        "command" if channel == commands => self.run_command(&data),
-                        "client-input" => {
-                            if let (Some(sid), Some(bytes)) = (terminal_session(&channel), data.get("data").and_then(Value::as_str).and_then(|d| B64.decode(d).ok())) {
-                                let _ = self.tl.write(sid, bytes);
-                            }
-                        }
+                            self.set_counts(synced.len(), forwarders.len());
+                        },
+                        "input" => if let (Some(id), Some(bytes)) = (id, m["data"].as_str().and_then(|d| B64.decode(d).ok())) {
+                            let _ = self.tl.write(id, bytes);
+                        },
+                        "bye" => break Err(Fail::Revoked),
                         _ => {}
                     }
                 }
@@ -414,19 +302,17 @@ impl Bridge {
                     Ok(CoreEvent::SessionUpdated { session }) => { dirty.entry(session.record.id).or_insert_with(Instant::now); }
                     Ok(CoreEvent::SessionRemoved { id }) => {
                         dirty.remove(&id);
+                        if let Some(f) = forwarders.remove(&id) { f.abort(); }
                         if synced.remove(&id) {
-                            self.drop_session(cfg, id, &mut sink, &mut viewers, &mut forwarders).await?;
-                            self.set_counts(synced.len(), viewers.values().map(HashSet::len).sum());
+                            send(&mut sink, json!({ "type": "removed", "id": id.to_string() })).await?;
+                            self.set_counts(synced.len(), forwarders.len());
                         }
                     }
                     Ok(CoreEvent::FoldersChanged) | Err(broadcast::error::RecvError::Lagged(_)) => {
                         dirty.clear();
                         self.branches.lock().expect("branch lock").clear();
-                        self.full_sync(cfg, &socket_id, &mut sink, &mut synced).await?;
-                        for gone in viewers.keys().copied().filter(|id| !synced.contains(id)).collect::<Vec<_>>() {
-                            self.drop_session(cfg, gone, &mut sink, &mut viewers, &mut forwarders).await?;
-                        }
-                        self.set_counts(synced.len(), viewers.values().map(HashSet::len).sum());
+                        self.full_sync(&mut sink, &mut synced).await?;
+                        self.set_counts(synced.len(), forwarders.len());
                     }
                     Err(broadcast::error::RecvError::Closed) => break Ok(()),
                 },
@@ -436,23 +322,28 @@ impl Bridge {
                         dirty.remove(&id);
                         match self.session_payload(id).await {
                             Some(view) => {
-                                self.api(cfg, reqwest::Method::POST, &format!("/machine/sessions/{id}"), Some(view)).await?;
-                                if synced.insert(id) {
-                                    self.subscribe_terminal(cfg, &socket_id, &mut sink, id).await?;
-                                }
+                                send(&mut sink, json!({ "type": "session", "session": view })).await?;
+                                synced.insert(id);
                             }
                             None => {
                                 if synced.remove(&id) {
-                                    self.drop_session(cfg, id, &mut sink, &mut viewers, &mut forwarders).await?;
+                                    send(&mut sink, json!({ "type": "removed", "id": id.to_string() })).await?;
                                 }
                             }
                         }
                     }
-                    self.set_counts(synced.len(), viewers.values().map(HashSet::len).sum());
+                    self.set_counts(synced.len(), forwarders.len());
                 }
-                _ = heartbeat.tick() => self.heartbeat(cfg).await?,
-                _ = ping.tick() => send(&mut sink, json!({"event": "pusher:ping", "data": {}}).to_string()).await?,
-                Some(frame) = out_rx.recv() => send(&mut sink, frame).await?,
+                _ = ping.tick() => {
+                    if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break Err(Fail::Other("Connection lost.".into()));
+                    }
+                }
+                Some(frame) = out_rx.recv() => {
+                    if sink.send(Message::Text(frame.into())).await.is_err() {
+                        break Err(Fail::Other("Connection lost.".into()));
+                    }
+                }
             }
         };
 
@@ -462,106 +353,24 @@ impl Bridge {
         result
     }
 
-    /// Sends the full session list and subscribes to each one's terminal channel.
+    /// Sends the full session list.
     async fn full_sync(
         &self,
-        cfg: &Paired,
-        socket_id: &str,
         sink: &mut WsSink,
         synced: &mut HashSet<SessionId>,
     ) -> Result<(), Fail> {
         let views = self.all_payloads().await;
-        let ids: HashSet<SessionId> = views
+        *synced = views
             .iter()
             .filter_map(|v| v.get("id")?.as_str()?.parse::<uuid::Uuid>().ok())
             .map(SessionId)
             .collect();
-        self.api(
-            cfg,
-            reqwest::Method::PUT,
-            "/machine/sessions",
-            Some(json!({ "sessions": views })),
-        )
-        .await?;
-        for id in ids.difference(synced).copied().collect::<Vec<_>>() {
-            self.subscribe_terminal(cfg, socket_id, sink, id).await?;
-        }
-        for id in synced.difference(&ids).copied().collect::<Vec<_>>() {
-            send(sink, unsubscribe_frame(&terminal_channel(id))).await?;
-        }
-        *synced = ids;
-        Ok(())
-    }
-
-    async fn subscribe_terminal(
-        &self,
-        cfg: &Paired,
-        socket_id: &str,
-        sink: &mut WsSink,
-        id: SessionId,
-    ) -> Result<(), Fail> {
-        let channel = terminal_channel(id);
-        let auth = self.channel_auth(cfg, socket_id, &channel).await?;
-        send(sink, subscribe_frame(&channel, &auth)).await
-    }
-
-    async fn drop_session(
-        &self,
-        cfg: &Paired,
-        id: SessionId,
-        sink: &mut WsSink,
-        viewers: &mut HashMap<SessionId, HashSet<String>>,
-        forwarders: &mut HashMap<SessionId, JoinHandle<()>>,
-    ) -> Result<(), Fail> {
-        viewers.remove(&id);
-        if let Some(f) = forwarders.remove(&id) {
-            f.abort();
-        }
-        send(sink, unsubscribe_frame(&terminal_channel(id))).await?;
-        match self
-            .api(
-                cfg,
-                reqwest::Method::DELETE,
-                &format!("/machine/sessions/{id}"),
-                None,
-            )
-            .await
-        {
-            Err(Fail::Other(e)) => {
-                tracing::debug!(error = %e, "remote: removing a session failed");
-                Ok(())
-            }
-            other => other.map(|_| ()),
-        }
-    }
-
-    /// Streams a terminal while someone watches it.
-    fn update_forwarder(
-        &self,
-        id: SessionId,
-        viewers: &HashMap<SessionId, HashSet<String>>,
-        forwarders: &mut HashMap<SessionId, JoinHandle<()>>,
-        out: &mpsc::Sender<String>,
-    ) {
-        let watched = viewers.get(&id).is_some_and(|v| !v.is_empty());
-        match (watched, forwarders.contains_key(&id)) {
-            (true, false) => {
-                if let Ok(att) = self.tl.attach(id) {
-                    forwarders.insert(id, spawn_forwarder(self.tl.clone(), id, att, out.clone()));
-                }
-            }
-            (false, true) => {
-                if let Some(f) = forwarders.remove(&id) {
-                    f.abort();
-                }
-            }
-            _ => {}
-        }
+        send(sink, json!({ "type": "snapshot", "sessions": views })).await
     }
 
     fn run_command(&self, data: &Value) {
         let kind = data
-            .get("type")
+            .get("command")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
@@ -727,7 +536,10 @@ impl Bridge {
         let server_url = normalize_url(&req.server_url)?;
         let code = req.code.trim();
         if code.is_empty() {
-            return Err("Enter the pairing code from your ExampleLab dashboard.".into());
+            return Err(
+                "Enter the pairing code from your Termlab server (Machines › Pair a machine)."
+                    .into(),
+            );
         }
         let name = if req.machine_name.trim().is_empty() {
             self.default_name.clone()
@@ -736,7 +548,7 @@ impl Bridge {
         };
         let res = self
             .http
-            .post(format!("{server_url}/api/v1/pair"))
+            .post(format!("{server_url}/api/pair"))
             .header("Accept", "application/json")
             .json(&json!({ "code": code, "name": name, "os": self.os, "version": VERSION }))
             .send()
@@ -762,7 +574,7 @@ impl Bridge {
         let text = res.text().await.unwrap_or_default();
         if matches!(status.as_u16(), 404 | 405) {
             return Err(format!(
-                "{server_url} doesn't look like an ExampleLab server (it answered {}). Check the address; \
+                "{server_url} doesn't look like a Termlab server (it answered {}). Check the address; \
                  a server on your own computer usually needs http://.",
                 status.as_u16()
             ));
@@ -771,24 +583,14 @@ impl Bridge {
             return Err(server_message(status, &text));
         }
         let v: Value = serde_json::from_str(&text)
-            .map_err(|_| format!("{server_url} doesn't look like an ExampleLab server."))?;
-        let reverb: Reverb = serde_json::from_value(v["reverb"].clone()).map_err(|_| {
-            "The server's reply was missing its live-connection details.".to_string()
-        })?;
+            .map_err(|_| format!("{server_url} doesn't look like a Termlab server."))?;
         let paired = Paired {
+            protocol: PROTOCOL,
             server_url,
             token: v["token"].as_str().unwrap_or_default().to_string(),
             machine_id: v["machine_id"].as_u64().unwrap_or_default(),
             machine_name: name,
-            account_name: v
-                .pointer("/account/name")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            plan: v
-                .pointer("/account/plan")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            reverb,
+            server_name: v["server_name"].as_str().map(str::to_string),
         };
         if paired.token.is_empty() || paired.machine_id == 0 {
             return Err("The server's reply was missing the machine token.".into());
@@ -818,10 +620,13 @@ impl Bridge {
             t.abort();
         }
         if let Some(cfg) = paired {
-            // Best effort: the dashboard forgets the machine too.
+            // Best effort: the server forgets this computer too.
             let _ = tokio::time::timeout(
                 Duration::from_secs(5),
-                self.api(&cfg, reqwest::Method::DELETE, "/machine", None),
+                self.http
+                    .delete(format!("{}/api/machine", cfg.server_url))
+                    .bearer_auth(&cfg.token)
+                    .send(),
             )
             .await;
         }
@@ -861,8 +666,8 @@ impl Bridge {
             state: inner.state,
             server_url: p.map(|p| p.server_url.clone()),
             machine_name: p.map(|p| p.machine_name.clone()),
-            account_name: p.and_then(|p| p.account_name.clone()),
-            plan: p.and_then(|p| p.plan.clone()),
+            account_name: p.and_then(|p| p.server_name.clone()),
+            plan: None,
             error: inner.error.clone(),
             sessions: inner.sessions,
             viewers: inner.viewers,
@@ -873,17 +678,16 @@ impl Bridge {
 
 // ---- terminal streaming ------------------------------------------------------------
 
-/// Sends a snapshot, then live output, as client events on the session's channel.
+/// Sends a snapshot, then live output, while someone watches.
 fn spawn_forwarder(
     tl: Arc<Termlab>,
     id: SessionId,
     att: termlab_core::pty::Attachment,
     out: mpsc::Sender<String>,
 ) -> JoinHandle<()> {
-    let channel = terminal_channel(id);
     tokio::spawn(async move {
         let mut events = att.events;
-        if !send_snapshot(&out, &channel, att.size, &att.snapshot).await {
+        if !send_snapshot(&out, id, att.size, &att.snapshot).await {
             return;
         }
         let mut pending: Vec<u8> = Vec::new();
@@ -896,7 +700,7 @@ fn spawn_forwarder(
                     Ok(fresh) => {
                         pending.clear();
                         events = fresh.events;
-                        if !send_snapshot(&out, &channel, fresh.size, &fresh.snapshot).await {
+                        if !send_snapshot(&out, id, fresh.size, &fresh.snapshot).await {
                             return;
                         }
                         continue;
@@ -906,7 +710,7 @@ fn spawn_forwarder(
             }
             if !done {
                 let deadline = tokio::time::Instant::now() + OUTPUT_BATCH;
-                while pending.len() < CHUNK * 8 {
+                while pending.len() < CHUNK * 4 {
                     tokio::select! {
                         _ = tokio::time::sleep_until(deadline) => break,
                         ev = events.recv() => match ev {
@@ -918,12 +722,11 @@ fn spawn_forwarder(
                 }
             }
             for chunk in pending.chunks(CHUNK) {
-                let frame = client_event(
-                    &channel,
-                    "client-output",
-                    json!({ "data": B64.encode(chunk) }),
-                );
-                if out.send(frame).await.is_err() {
+                if out
+                    .send(output_frame(id, chunk, false, None))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -937,7 +740,7 @@ fn spawn_forwarder(
 
 async fn send_snapshot(
     out: &mpsc::Sender<String>,
-    channel: &str,
+    id: SessionId,
     size: Option<termlab_core::model::TermSize>,
     snapshot: &[u8],
 ) -> bool {
@@ -953,17 +756,9 @@ async fn send_snapshot(
     bytes.extend_from_slice(tail);
     for (i, chunk) in bytes.chunks(CHUNK).enumerate() {
         let frame = if i == 0 {
-            client_event(
-                channel,
-                "client-snapshot",
-                json!({ "data": B64.encode(chunk), "cols": size.map(|s| s.cols), "rows": size.map(|s| s.rows) }),
-            )
+            output_frame(id, chunk, true, size)
         } else {
-            client_event(
-                channel,
-                "client-output",
-                json!({ "data": B64.encode(chunk) }),
-            )
+            output_frame(id, chunk, false, None)
         };
         if out.send(frame).await.is_err() {
             return false;
@@ -972,75 +767,46 @@ async fn send_snapshot(
     true
 }
 
-// ---- Pusher protocol helpers -------------------------------------------------------
+fn output_frame(
+    id: SessionId,
+    data: &[u8],
+    snapshot: bool,
+    size: Option<termlab_core::model::TermSize>,
+) -> String {
+    json!({
+        "type": "output",
+        "id": id.to_string(),
+        "data": B64.encode(data),
+        "snapshot": snapshot,
+        "cols": size.map(|s| s.cols),
+        "rows": size.map(|s| s.rows),
+    })
+    .to_string()
+}
 
 type WsSink = futures_util::stream::SplitSink<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     Message,
 >;
 
-async fn send(sink: &mut WsSink, frame: String) -> Result<(), Fail> {
-    sink.send(Message::Text(frame.into()))
+async fn send(sink: &mut WsSink, v: Value) -> Result<(), Fail> {
+    sink.send(Message::Text(v.to_string().into()))
         .await
-        .map_err(|e| Fail::Other(format!("Live connection lost: {e}")))
+        .map_err(|e| Fail::Other(format!("Connection lost: {e}")))
 }
 
-/// `(event, channel, data)`; `data` is decoded when the server sent it as a JSON string.
-fn parse_frame(text: &str) -> (String, String, Value) {
-    let v: Value = serde_json::from_str(text).unwrap_or(Value::Null);
-    let event = v
-        .get("event")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let channel = v
-        .get("channel")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let data = match v.get("data") {
-        Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::String(s.clone())),
-        Some(other) => other.clone(),
-        None => Value::Null,
+/// `https://host/x` → `wss://host/api/...` (http → ws).
+fn ws_url(server_url: &str, path: &str) -> Option<reqwest::Url> {
+    let mut u = reqwest::Url::parse(server_url).ok()?;
+    let scheme = match u.scheme() {
+        "https" => "wss",
+        "http" => "ws",
+        _ => return None,
     };
-    (event, channel, data)
-}
-
-fn subscribe_frame(channel: &str, auth: &Value) -> String {
-    let mut data =
-        json!({ "channel": channel, "auth": auth.get("auth").cloned().unwrap_or(Value::Null) });
-    if let Some(cd) = auth.get("channel_data") {
-        data["channel_data"] = cd.clone();
-    }
-    json!({ "event": "pusher:subscribe", "data": data }).to_string()
-}
-
-fn unsubscribe_frame(channel: &str) -> String {
-    json!({ "event": "pusher:unsubscribe", "data": { "channel": channel } }).to_string()
-}
-
-fn client_event(channel: &str, event: &str, data: Value) -> String {
-    json!({ "event": event, "channel": channel, "data": data }).to_string()
-}
-
-fn terminal_channel(id: SessionId) -> String {
-    format!("presence-terminal.{id}")
-}
-
-fn terminal_session(channel: &str) -> Option<SessionId> {
-    channel
-        .strip_prefix("presence-terminal.")?
-        .parse::<uuid::Uuid>()
-        .ok()
-        .map(SessionId)
-}
-
-fn member_id(v: &Value) -> Option<String> {
-    match v {
-        Value::String(s) => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    }
+    u.set_scheme(scheme).ok()?;
+    u.set_path(path);
+    u.set_query(None);
+    Some(u)
 }
 
 // ---- small helpers -----------------------------------------------------------------
@@ -1073,7 +839,7 @@ fn clip(s: &str, max: usize) -> String {
 fn normalize_url(raw: &str) -> Result<String, String> {
     let raw = raw.trim().trim_end_matches('/');
     if raw.is_empty() {
-        return Err("Enter the address of your ExampleLab server.".into());
+        return Err("Enter the address of your Termlab server.".into());
     }
     let url = if raw.contains("://") {
         raw.to_string()
@@ -1176,45 +942,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frames_decode_string_data() {
-        let (event, channel, data) = parse_frame(
-            r#"{"event":"command","channel":"private-machine.3","data":"{\"type\":\"stop\",\"session_id\":\"x\"}"}"#,
+    fn websocket_urls_follow_the_server_scheme() {
+        assert_eq!(
+            ws_url("https://remote.example.com", "/api/machine/ws")
+                .unwrap()
+                .as_str(),
+            "wss://remote.example.com/api/machine/ws"
         );
-        assert_eq!(event, "command");
-        assert_eq!(channel, "private-machine.3");
-        assert_eq!(data["type"], "stop");
-    }
-
-    #[test]
-    fn terminal_channels_round_trip() {
-        let id = SessionId(uuid::Uuid::new_v4());
-        assert_eq!(terminal_session(&terminal_channel(id)), Some(id));
-        assert_eq!(terminal_session("private-machine.1"), None);
+        assert_eq!(
+            ws_url("http://127.0.0.1:8484", "/api/machine/ws")
+                .unwrap()
+                .as_str(),
+            "ws://127.0.0.1:8484/api/machine/ws"
+        );
+        assert!(ws_url("ftp://x", "/a").is_none());
     }
 
     #[test]
     fn urls_are_normalized() {
         assert_eq!(
-            normalize_url("examplelab.com/").unwrap(),
-            "https://examplelab.com"
+            normalize_url("remote.example.com/").unwrap(),
+            "https://remote.example.com"
         );
         assert_eq!(
-            normalize_url("http://examplelab.test").unwrap(),
-            "http://examplelab.test"
+            normalize_url("http://127.0.0.1:8484").unwrap(),
+            "http://127.0.0.1:8484"
         );
         assert!(normalize_url("").is_err());
         assert!(normalize_url("ftp://x").is_err());
     }
 
     #[test]
-    fn subscribe_includes_presence_data() {
-        let f = subscribe_frame(
-            "presence-terminal.x",
-            &json!({"auth": "k:sig", "channel_data": "{\"user_id\":\"machine-1\"}"}),
-        );
-        let v: Value = serde_json::from_str(&f).unwrap();
-        assert_eq!(v["data"]["auth"], "k:sig");
-        assert_eq!(v["data"]["channel_data"], "{\"user_id\":\"machine-1\"}");
+    fn output_frames_carry_size_only_on_snapshots() {
+        let id = SessionId(uuid::Uuid::new_v4());
+        let size = Some(termlab_core::model::TermSize { cols: 90, rows: 24 });
+        let snap: Value = serde_json::from_str(&output_frame(id, b"hi", true, size)).unwrap();
+        assert_eq!(snap["type"], "output");
+        assert_eq!(snap["snapshot"], true);
+        assert_eq!(snap["cols"], 90);
+        assert_eq!(B64.decode(snap["data"].as_str().unwrap()).unwrap(), b"hi");
+        let live: Value = serde_json::from_str(&output_frame(id, b"x", false, None)).unwrap();
+        assert!(live["cols"].is_null());
+    }
+
+    #[test]
+    fn old_pairings_are_not_reused() {
+        let old = r#"{"server_url":"https://examplelab.com","token":"t","machine_id":1,"machine_name":"m","account_name":"a","plan":"remote","reverb":{}}"#;
+        let p: Paired = serde_json::from_str(old).unwrap();
+        assert_ne!(p.protocol, PROTOCOL);
     }
 
     #[test]
