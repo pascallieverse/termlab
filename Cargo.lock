@@ -5691,7 +5691,7 @@ dependencies = [
 
 [[package]]
 name = "termlab-core"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "bytes",
  "directories",
@@ -5711,7 +5711,7 @@ dependencies = [
 
 [[package]]
 name = "termlab-desktop"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "objc2-foundation",
@@ -5733,11 +5733,11 @@ dependencies = [
 
 [[package]]
 name = "termlab-hook"
-version = "0.2.9"
+version = "0.2.10"
 
 [[package]]
 name = "termlab-server"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5771,7 +5771,7 @@ dependencies = [
 
 [[package]]
 name = "termlabd"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
