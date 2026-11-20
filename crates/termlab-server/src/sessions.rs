@@ -39,6 +39,17 @@ pub struct ChangedFileIn {
 pub struct SessionIn {
     pub id: String,
     pub project: String,
+    /// The project folder's path on the machine; also what its notes are keyed by.
+    pub directory: Option<String>,
+    /// Where the project sits in Termlab's sidebar.
+    pub project_order: Option<i64>,
+    /// The project folder's id on the machine.
+    pub folder_id: Option<i64>,
+    /// Put on hold in Termlab (its On hold tab).
+    #[serde(default)]
+    pub on_hold: bool,
+    /// When the session started (ms since the epoch); the sidebar lists newest first.
+    pub created_at: Option<i64>,
     pub title: String,
     pub agent: String,
     pub model: Option<String>,
@@ -88,6 +99,11 @@ impl SessionIn {
             json!({
                 "id": id,
                 "project": clip(&self.project, 200),
+                "directory": self.directory.map(|d| clip(&d, 1000)),
+                "project_order": self.project_order,
+                "folder_id": self.folder_id,
+                "on_hold": self.on_hold,
+                "created_at": self.created_at,
                 "title": clip(&self.title, 300),
                 "agent": clip(&self.agent, 40),
                 "model": self.model.map(|m| clip(&m, 100)),
@@ -311,7 +327,8 @@ pub fn machines(app: &AppRef) -> rusqlite::Result<Vec<Value>> {
         let mut st = c.prepare(
             "select m.id, m.name, m.os, m.version, m.online, m.last_seen_at,
                     (select count(*) from sessions s where s.machine_id = m.id),
-                    (select count(*) from sessions s where s.machine_id = m.id and s.status in ('running', 'needs_you'))
+                    (select count(*) from sessions s where s.machine_id = m.id and s.status in ('running', 'needs_you')),
+                    exists(select 1 from meta where key = 'notes_sync:' || m.id)
              from machines m order by m.name",
         )?;
         let rows = st.query_map([], |r| {
@@ -324,6 +341,202 @@ pub fn machines(app: &AppRef) -> rusqlite::Result<Vec<Value>> {
                 "last_seen_at": r.get::<_, Option<String>>(5)?,
                 "sessions": r.get::<_, i64>(6)?,
                 "running": r.get::<_, i64>(7)?,
+                // Its Termlab syncs project notes (0.2.9 and newer).
+                "notes_sync": r.get::<_, bool>(8)?,
+            }))
+        })?;
+        rows.collect()
+    })
+}
+
+// ---- plan usage ------------------------------------------------------------------------
+
+/// The plan usage a machine reported (Termlab's `PlanUsage` list), bounded field by field.
+pub fn clean_usage(raw: &Value) -> Value {
+    let list = raw.as_array().cloned().unwrap_or_default();
+    let s = |v: &Value, max: usize| v.as_str().map(|t| clip(t, max));
+    Value::Array(
+        list.iter()
+            .take(10)
+            .filter_map(|u| {
+                let agent = s(&u["agent"], 40)?;
+                let windows: Vec<Value> = u["windows"]
+                    .as_array()
+                    .map(|w| {
+                        w.iter().take(12).filter_map(|w| {
+                        Some(json!({
+                            "id": s(&w["id"], 60)?,
+                            "label": s(&w["label"], 100),
+                            "usedPercentage": w["usedPercentage"].as_f64()?.clamp(0.0, 1000.0),
+                            "resetsAt": w["resetsAt"].as_i64(),
+                        }))
+                    }).collect()
+                    })
+                    .unwrap_or_default();
+                Some(json!({
+                    "agent": agent,
+                    "windows": windows,
+                    "updatedAt": u["updatedAt"].as_i64().unwrap_or(0),
+                    "connected": u["connected"].as_bool(),
+                    "plan": s(&u["plan"], 60),
+                    "note": s(&u["note"], 300),
+                }))
+            })
+            .collect(),
+    )
+}
+
+pub fn set_usage(app: &AppRef, machine_id: i64, raw: &Value) -> Value {
+    let usage = clean_usage(raw);
+    let _ = app
+        .db
+        .set_meta(&format!("usage:{machine_id}"), &usage.to_string());
+    usage
+}
+
+/// Each machine's last reported plan usage.
+pub fn usage(app: &AppRef) -> rusqlite::Result<Vec<Value>> {
+    app.db.with(|c| {
+        let mut st = c.prepare(
+            "select m.id, meta.value from machines m join meta on meta.key = 'usage:' || m.id",
+        )?;
+        let rows = st.query_map([], |r| {
+            let v: String = r.get(1)?;
+            Ok(json!({
+                "machine_id": r.get::<_, i64>(0)?,
+                "usage": serde_json::from_str::<Value>(&v).unwrap_or(json!([])),
+            }))
+        })?;
+        rows.collect()
+    })
+}
+
+// ---- projects and agents ---------------------------------------------------------------
+
+/// A machine's project folders (in its sidebar order) and installed agents, bounded.
+pub fn set_projects(app: &AppRef, machine_id: i64, msg: &Value) -> Value {
+    let s = |v: &Value, max: usize| v.as_str().map(|t| clip(t, max));
+    let projects: Vec<Value> = msg["projects"]
+        .as_array()
+        .map(|l| {
+            l.iter()
+                .take(500)
+                .filter_map(|p| {
+                    Some(json!({
+                        "id": p["id"].as_i64()?,
+                        "name": s(&p["name"], 200)?,
+                        "path": s(&p["path"], 1000)?,
+                        "order": p["order"].as_i64().unwrap_or(0),
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let agents: Vec<Value> = msg["agents"]
+        .as_array()
+        .map(|l| {
+            l.iter()
+                .take(20)
+                .filter_map(|a| {
+                    Some(json!({
+                        "agent": s(&a["agent"], 40)?,
+                        "name": s(&a["name"], 60)?,
+                        "model_flag": a["model_flag"].as_bool().unwrap_or(false),
+                        "models": a["models"].as_array().map(|m| m.iter().take(20).filter_map(|x| s(x, 100)).collect::<Vec<_>>()).unwrap_or_default(),
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let v = json!({ "machine_id": machine_id, "projects": projects, "agents": agents });
+    let _ = app
+        .db
+        .set_meta(&format!("projects:{machine_id}"), &v.to_string());
+    v
+}
+
+/// Each machine's projects and agents.
+pub fn projects(app: &AppRef) -> rusqlite::Result<Vec<Value>> {
+    app.db.with(|c| {
+        let mut st = c.prepare(
+            "select meta.value from machines m join meta on meta.key = 'projects:' || m.id",
+        )?;
+        let rows = st.query_map([], |r| {
+            let v: String = r.get(0)?;
+            Ok(serde_json::from_str::<Value>(&v).unwrap_or(Value::Null))
+        })?;
+        rows.collect()
+    })
+}
+
+/// One machine's stored projects and agents (empty when it never sent them).
+pub fn machine_projects(app: &AppRef, machine_id: i64) -> Value {
+    app.db
+        .meta(&format!("projects:{machine_id}"))
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_else(|| json!({ "projects": [], "agents": [] }))
+}
+
+// ---- project notes ---------------------------------------------------------------------
+
+/// The longest notes kept for one project, in characters.
+pub const NOTES_MAX: usize = 100_000;
+
+#[derive(Debug, Deserialize)]
+pub struct NotesIn {
+    pub path: String,
+    pub text: String,
+    pub updated_at: Option<i64>,
+}
+
+/// A machine sent all of its projects' notes: they replace what was stored. Returns the
+/// machine's notes as browsers get them.
+pub fn replace_notes(
+    app: &AppRef,
+    machine_id: i64,
+    list: Vec<Value>,
+) -> rusqlite::Result<Vec<Value>> {
+    let list: Vec<NotesIn> = list
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .take(1000)
+        .collect();
+    app.db.with(|c| {
+        let tx = c.unchecked_transaction()?;
+        tx.execute("delete from project_notes where machine_id = ?1", [machine_id])?;
+        for n in &list {
+            if n.path.is_empty() || n.text.trim().is_empty() {
+                continue;
+            }
+            tx.execute(
+                "insert or replace into project_notes (machine_id, path, text, updated_at) values (?1, ?2, ?3, ?4)",
+                (machine_id, clip(&n.path, 1000), clip(&n.text, NOTES_MAX), n.updated_at),
+            )?;
+        }
+        tx.execute(
+            "insert or ignore into meta (key, value) values (?1, '1')",
+            [format!("notes_sync:{machine_id}")],
+        )?;
+        tx.commit()
+    })?;
+    Ok(notes(app)?
+        .into_iter()
+        .filter(|n| n["machine_id"] == json!(machine_id))
+        .collect())
+}
+
+/// Every machine's project notes.
+pub fn notes(app: &AppRef) -> rusqlite::Result<Vec<Value>> {
+    app.db.with(|c| {
+        let mut st = c.prepare(
+            "select machine_id, path, text, updated_at from project_notes order by machine_id, path",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok(json!({
+                "machine_id": r.get::<_, i64>(0)?,
+                "path": r.get::<_, String>(1)?,
+                "text": r.get::<_, String>(2)?,
+                "updated_at": r.get::<_, Option<i64>>(3)?,
             }))
         })?;
         rows.collect()

@@ -1,16 +1,33 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { AppStateContext } from '@/app-state';
 import { ToastProvider } from '@/components/el/toast';
 import { LiveProvider } from '@/live/LiveProvider';
 import { api, setUnauthorizedHandler } from '@/lib/api';
 import Login from '@/pages/Login';
-import Machines from '@/pages/Machines';
 import Remote from '@/pages/Remote';
 import Settings from '@/pages/Settings';
 import Setup from '@/pages/Setup';
-import Webhooks from '@/pages/Webhooks';
 import type { ServerState } from '@/types';
+
+/**
+ * The sessions, always; Settings opens over them as a dialog, as in the desktop app, so the
+ * terminal you were watching keeps streaming behind it.
+ */
+function Main() {
+    const path = useLocation().pathname;
+    const settings = path === '/settings' || path.startsWith('/settings/');
+    if (!settings && path !== '/remote') {
+        return <Navigate to="/remote" replace />;
+    }
+
+    return (
+        <>
+            <Remote />
+            {settings && <Settings />}
+        </>
+    );
+}
 
 export default function App() {
     const [state, setState] = useState<ServerState | null>(null);
@@ -71,11 +88,10 @@ export default function App() {
                     ) : (
                         <LiveProvider onSignedOut={signedOut}>
                             <Routes>
-                                <Route path="/remote" element={<Remote />} />
-                                <Route path="/machines" element={<Machines />} />
-                                <Route path="/webhooks" element={<Webhooks />} />
-                                <Route path="/settings" element={<Settings />} />
-                                <Route path="*" element={<Navigate to="/remote" replace />} />
+                                {/* Before Settings held them. */}
+                                <Route path="/machines" element={<Navigate to="/settings/machines" replace />} />
+                                <Route path="/webhooks" element={<Navigate to="/settings/webhooks" replace />} />
+                                <Route path="*" element={<Main />} />
                             </Routes>
                         </LiveProvider>
                     )}

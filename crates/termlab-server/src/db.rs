@@ -51,6 +51,14 @@ create table if not exists sessions (
   updated_at text not null
 );
 
+create table if not exists project_notes (
+  machine_id integer not null references machines(id) on delete cascade,
+  path text not null,
+  text text not null,
+  updated_at integer,
+  primary key (machine_id, path)
+);
+
 create table if not exists audit_log (
   id integer primary key,
   action text not null,

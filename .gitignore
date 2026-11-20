@@ -8,3 +8,6 @@
 
 # Logs and local scratch
 *.log
+
+# Local target for crates/termlab-server/deploy-dev.sh
+.deploy-server.env

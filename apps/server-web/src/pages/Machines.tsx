@@ -1,16 +1,17 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Button } from '@/components/el/button';
 import { Dialog } from '@/components/el/dialog';
 import { Panel } from '@/components/el/panel';
 import { Pill } from '@/components/el/status';
 import { useToast } from '@/components/el/toast';
-import { AppShell, PageHeader } from '@/layouts/AppShell';
+import { HeadActions, SectionNote } from '@/layouts/SettingsLayout';
 import { useLive } from '@/live/LiveProvider';
 import { api, errorMessage } from '@/lib/api';
 import { formatDate, timeAgo } from '@/lib/format';
 import type { Machine } from '@/types';
 
-export default function Machines() {
+/** Settings › Machines. */
+export function MachinesSection() {
     const live = useLive();
     const [pairing, setPairing] = useState(false);
     const [managing, setManaging] = useState<Machine | null>(null);
@@ -18,12 +19,15 @@ export default function Machines() {
     const online = machines.filter((m) => m.online).length;
 
     return (
-        <AppShell>
-            <PageHeader
-                title="Machines"
-                description={`${online} of ${machines.length} online. Computers running Termlab that are linked to this server.`}
-                actions={<Button onClick={() => setPairing(true)}>Pair a machine</Button>}
-            />
+        <>
+            <HeadActions>
+                <Button onClick={() => setPairing(true)}>Pair a machine</Button>
+            </HeadActions>
+            {machines.length > 0 && (
+                <SectionNote>
+                    {online} of {machines.length} online.
+                </SectionNote>
+            )}
 
             <ServerAddress />
 
@@ -87,34 +91,78 @@ export default function Machines() {
 
             <PairDialog open={pairing} onClose={() => setPairing(false)} />
             <ManageDialog machine={managing} onClose={() => setManaging(null)} />
-        </AppShell>
+        </>
     );
 }
 
-/** What to type into Termlab's "Server address" field. */
+/** What to type into Termlab's "Server address" field. Clicking the address copies it. */
 function ServerAddress() {
     const toast = useToast();
     const address = window.location.origin;
+    const [copied, setCopied] = useState(false);
+
+    useEffect(() => {
+        if (!copied) return;
+        const timer = window.setTimeout(() => setCopied(false), 2000);
+        return () => window.clearTimeout(timer);
+    }, [copied]);
+
+    function copy() {
+        navigator.clipboard.writeText(address).then(
+            () => setCopied(true),
+            () => toast.error('Could not copy. Select the address and copy it.'),
+        );
+    }
 
     return (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-line bg-panel px-5 py-4">
             <div className="flex min-w-0 flex-col gap-0.5">
                 <span className="text-[13px] text-dim">Server address for Termlab</span>
-                <code className="font-mono text-[15px] break-all text-ink">{address}</code>
+                <button
+                    type="button"
+                    onClick={copy}
+                    title="Click to copy"
+                    aria-label={`Copy ${address}`}
+                    className={`group -mx-2 flex min-w-0 cursor-pointer items-center gap-2 rounded-lg border px-2 py-1 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-soft ${
+                        copied ? 'border-ok/40 bg-ok-bg' : 'border-transparent hover:border-line hover:bg-line-soft'
+                    }`}
+                >
+                    <code className={`font-mono text-[15px] break-all transition-colors ${copied ? 'text-ok' : 'text-ink'}`}>{address}</code>
+                    <span
+                        aria-hidden="true"
+                        className={`shrink-0 transition-opacity ${copied ? 'text-ok opacity-100' : 'text-dim opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100'}`}
+                    >
+                        {copied ? <CheckIcon /> : <CopyIcon />}
+                    </span>
+                </button>
             </div>
-            <Button
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                    navigator.clipboard.writeText(address).then(
-                        () => toast.success('Address copied.'),
-                        () => toast.error('Could not copy. Select the address and copy it.'),
-                    )
-                }
-            >
-                Copy
+            <Button variant="outline" size="sm" onClick={copy}>
+                <span className={`inline-flex items-center gap-1.5 ${copied ? 'text-ok' : ''}`}>
+                    {copied ? <CheckIcon /> : <CopyIcon />}
+                    {copied ? 'Copied' : 'Copy'}
+                </span>
             </Button>
+            <span role="status" className="sr-only">
+                {copied ? 'Address copied' : ''}
+            </span>
         </div>
+    );
+}
+
+function CopyIcon() {
+    return (
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" />
+            <path d="M10.5 5.5V3.75A1.25 1.25 0 0 0 9.25 2.5h-5.5A1.25 1.25 0 0 0 2.5 3.75v5.5a1.25 1.25 0 0 0 1.25 1.25H5.5" />
+        </svg>
+    );
+}
+
+function CheckIcon() {
+    return (
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 8.5l3.25 3.25L13 5" />
+        </svg>
     );
 }
 
@@ -136,7 +184,11 @@ function useCountdown(until: string | null): number {
 }
 
 function PairDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+    const live = useLive();
+    const toast = useToast();
     const [code, setCode] = useState<Code | null>(null);
+    // The machines there were before this code: the one that pairs with it is any other.
+    const known = useRef<Set<number> | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const left = useCountdown(code?.expires_at ?? null);
@@ -145,6 +197,7 @@ function PairDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
     async function fetchCode() {
         setLoading(true);
         setError(null);
+        known.current = new Set(live.machines.map((m) => m.id));
         try {
             setCode(await api.post<Code>('/api/pairing-codes'));
         } catch (e) {
@@ -161,8 +214,17 @@ function PairDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
         } else {
             setCode(null);
             setError(null);
+            known.current = null;
         }
     }, [open]);
+
+    // Closes by itself once the new machine connects.
+    const linked = open && known.current ? live.machines.find((m) => m.online && !known.current!.has(m.id)) : undefined;
+    useEffect(() => {
+        if (!linked) return;
+        toast.success(`${linked.name} is linked.`);
+        onClose();
+    }, [linked?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const minutes = Math.floor(left / 60);
     const seconds = String(left % 60).padStart(2, '0');
@@ -205,7 +267,7 @@ function PairDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
                     Enter this server’s address,{' '}
                     <code className="font-mono text-ink">{window.location.origin}</code>, and the code.
                 </li>
-                <li>The machine shows up here as soon as it connects.</li>
+                <li>This closes by itself as soon as the machine connects.</li>
             </ol>
 
             <div className="flex flex-wrap justify-end gap-2">

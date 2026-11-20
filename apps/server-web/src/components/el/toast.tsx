@@ -49,12 +49,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                     <div
                         key={t.id}
                         className={cn(
-                            'pointer-events-auto rounded-[10px] border px-4 py-3 text-sm shadow-lg',
+                            'pointer-events-auto rounded-[10px] border bg-panel px-3.5 py-2.5 text-[13px] shadow-[0_8px_30px_rgba(0,0,0,0.4)]',
                             t.tone === 'error'
-                                ? 'border-bad-line bg-bad-bg text-bad'
+                                ? 'border-bad-line text-bad'
                                 : t.tone === 'success'
-                                  ? 'border-line-strong bg-panel text-ink'
-                                  : 'border-line-strong bg-panel text-ink-soft',
+                                  ? 'border-line-strong text-ink'
+                                  : 'border-line-strong text-ink-soft',
                         )}
                     >
                         {t.message}

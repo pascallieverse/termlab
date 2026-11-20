@@ -280,6 +280,37 @@ fn handle_machine(app: &AppRef, machine: i64, text: &str) {
                 refresh_machine(app, machine);
             }
         }
+        "notes" => {
+            let list = msg["notes"].as_array().cloned().unwrap_or_default();
+            if let Ok(notes) = sessions::replace_notes(app, machine, list) {
+                app.hub.broadcast(
+                    &json!({ "type": "notes.updated", "machine_id": machine, "notes": notes }),
+                );
+                refresh_machine(app, machine);
+            }
+        }
+        "projects" => {
+            let v = sessions::set_projects(app, machine, &msg);
+            let mut out = v.clone();
+            out["type"] = json!("projects.updated");
+            app.hub.broadcast(&out);
+        }
+        "started" | "start_failed" => {
+            // Tells the browser that asked which session it got (or why not).
+            app.hub.broadcast(&json!({
+                "type": "session.start_result",
+                "machine_id": machine,
+                "request_id": msg["request_id"].as_str().map(|s| clip(s, 64)),
+                "id": msg["id"].as_str().and_then(|s| uuid::Uuid::parse_str(s).ok()).map(|u| u.to_string()),
+                "error": msg["error"].as_str().map(|s| clip(s, 500)),
+            }));
+        }
+        "usage" => {
+            let usage = sessions::set_usage(app, machine, &msg["usage"]);
+            app.hub.broadcast(
+                &json!({ "type": "usage.updated", "machine_id": machine, "usage": usage }),
+            );
+        }
         "output" => {
             let (Some(id), Some(data)) = (msg["id"].as_str(), msg["data"].as_str()) else {
                 return;
@@ -352,6 +383,9 @@ struct BrowserMsg {
     id: Option<String>,
     on: Option<bool>,
     data: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+    release: Option<bool>,
 }
 
 async fn browser_socket(app: AppRef, web_session: i64, socket: WebSocket) {
@@ -380,6 +414,16 @@ async fn browser_socket(app: AppRef, web_session: i64, socket: WebSocket) {
                         "input" => {
                             if let Some(data) = m.data.filter(|d| d.len() <= 64 * 1024) {
                                 app.hub.input(conn, &id, &data);
+                            }
+                        }
+                        "resize" => {
+                            if m.release == Some(true) {
+                                app.hub.resize(conn, &id, None);
+                            } else if let (Some(c), Some(r)) = (m.cols, m.rows)
+                                && (20..=500).contains(&c)
+                                && (5..=300).contains(&r)
+                            {
+                                app.hub.resize(conn, &id, Some((c, r)));
                             }
                         }
                         _ => {}

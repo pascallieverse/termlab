@@ -10,7 +10,7 @@ import {
 } from 'react';
 import { api, errorMessage } from '@/lib/api';
 import { useToast } from '@/components/el/toast';
-import type { ApprovalChoice, Machine, RemoteSession } from '@/types';
+import type { ApprovalChoice, Machine, MachineProjects, PlanUsage, ProjectNotes, RemoteSession, StartSessionRequest } from '@/types';
 
 export type Connection = 'connecting' | 'connected' | 'reconnecting';
 
@@ -25,16 +25,26 @@ type ServerMessage =
     | { type: 'session.updated'; session: RemoteSession }
     | { type: 'session.removed'; id: string }
     | { type: 'machine.updated'; machine: Machine }
+    | { type: 'notes.updated'; machine_id: number; notes: ProjectNotes[] }
+    | { type: 'usage.updated'; machine_id: number; usage: PlanUsage[] }
+    | ({ type: 'projects.updated' } & MachineProjects)
+    | { type: 'session.start_result'; machine_id: number; request_id: string | null; id: string | null; error: string | null }
     | { type: 'output'; id: string; data: string; snapshot: boolean; cols: number | null; rows: number | null }
     | { type: 'watch'; id: string; live: boolean };
 
-export type SessionAction = 'answer' | 'message' | 'stop' | 'hold';
+export type SessionAction = 'answer' | 'message' | 'stop' | 'hold' | 'unhold';
 
 type Live = {
     connection: Connection;
     loaded: boolean;
     sessions: RemoteSession[];
     machines: Machine[];
+    /** Every machine's project notes. */
+    notes: ProjectNotes[];
+    /** Each machine's plan usage, by machine id. */
+    usage: Record<number, PlanUsage[]>;
+    /** Each machine's projects (sidebar order) and installed agents, by machine id. */
+    projects: Record<number, MachineProjects>;
     /** Actions sent but not yet confirmed by the machine, by session id. */
     pending: Record<string, string>;
     reload: () => Promise<void>;
@@ -43,6 +53,14 @@ type Live = {
     /** Opens a terminal view: the machine streams it while at least one view is open. */
     watch: (id: string, listener: TerminalListener) => () => void;
     input: (id: string, data: string) => void;
+    /** Gives a watched session this view's terminal size; null hands it back to Termlab's. */
+    resize: (id: string, size: { cols: number; rows: number } | null) => void;
+    /** Saves a project's notes on its machine; false (after a toast) when that failed. */
+    saveNotes: (machineId: number, path: string, text: string) => Promise<boolean>;
+    /** Starts a session; resolves with its id once the machine started it. Throws with why not. */
+    startSession: (machineId: number, req: StartSessionRequest) => Promise<string>;
+    /** Moves a project before another (null: to the end), in Termlab too. */
+    moveProject: (machineId: number, folderId: number, before: number | null) => Promise<void>;
 };
 
 const LiveContext = createContext<Live | null>(null);
@@ -73,6 +91,11 @@ export function LiveProvider({ children, onSignedOut }: { children: ReactNode; o
     const [sessions, setSessions] = useState<RemoteSession[]>([]);
     const [machines, setMachines] = useState<Machine[]>([]);
     const [pending, setPending] = useState<Record<string, string>>({});
+    const [notes, setNotes] = useState<ProjectNotes[]>([]);
+    const [usage, setUsage] = useState<Record<number, PlanUsage[]>>({});
+    const [projects, setProjects] = useState<Record<number, MachineProjects>>({});
+    /** Session starts waiting for the machine's answer, by request id. */
+    const starts = useRef(new Map<string, (r: { id: string | null; error: string | null }) => void>());
 
     const socket = useRef<WebSocket | null>(null);
     const listeners = useRef(new Map<string, Set<TerminalListener>>());
@@ -86,9 +109,18 @@ export function LiveProvider({ children, onSignedOut }: { children: ReactNode; o
 
     const reload = useCallback(async () => {
         try {
-            const data = await api.get<{ machines: Machine[]; sessions: RemoteSession[] }>('/api/overview');
+            const data = await api.get<{
+                machines: Machine[];
+                sessions: RemoteSession[];
+                notes?: ProjectNotes[];
+                usage?: { machine_id: number; usage: PlanUsage[] }[];
+                projects?: MachineProjects[];
+            }>('/api/overview');
+            setProjects(Object.fromEntries((data.projects ?? []).filter(Boolean).map((p) => [p.machine_id, p])));
             setMachines(data.machines);
             setSessions(data.sessions);
+            setNotes(data.notes ?? []);
+            setUsage(Object.fromEntries((data.usage ?? []).map((u) => [u.machine_id, u.usage])));
             setLoaded(true);
         } catch {
             // 401 is handled by the API client; anything else retries on reconnect.
@@ -153,6 +185,29 @@ export function LiveProvider({ children, onSignedOut }: { children: ReactNode; o
                                 ? list.map((m) => (m.id === next.id ? next : m))
                                 : [...list, next],
                         );
+                        break;
+                    }
+                    case 'notes.updated': {
+                        const { machine_id, notes: list } = msg;
+                        setNotes((all) => [...all.filter((n) => n.machine_id !== machine_id), ...list]);
+                        break;
+                    }
+                    case 'usage.updated': {
+                        const { machine_id, usage: list } = msg;
+                        setUsage((all) => ({ ...all, [machine_id]: list }));
+                        break;
+                    }
+                    case 'projects.updated': {
+                        const { machine_id, projects: list, agents } = msg;
+                        setProjects((all) => ({ ...all, [machine_id]: { machine_id, projects: list, agents } }));
+                        break;
+                    }
+                    case 'session.start_result': {
+                        const done = msg.request_id ? starts.current.get(msg.request_id) : undefined;
+                        if (done && msg.request_id) {
+                            starts.current.delete(msg.request_id);
+                            done({ id: msg.id, error: msg.error });
+                        }
                         break;
                     }
                     case 'output':
@@ -226,6 +281,11 @@ export function LiveProvider({ children, onSignedOut }: { children: ReactNode; o
     );
 
     const input = useCallback((id: string, data: string) => send({ type: 'input', id, data }), [send]);
+    const resize = useCallback(
+        (id: string, size: { cols: number; rows: number } | null) =>
+            send(size ? { type: 'resize', id, cols: size.cols, rows: size.rows } : { type: 'resize', id, release: true }),
+        [send],
+    );
 
     const act = useCallback(
         async (session: RemoteSession, action: SessionAction, body: Record<string, unknown> = {}, label = 'Sent') => {
@@ -255,9 +315,72 @@ export function LiveProvider({ children, onSignedOut }: { children: ReactNode; o
         [act],
     );
 
+    const saveNotes = useCallback(
+        async (machineId: number, path: string, text: string) => {
+            try {
+                await api.put(`/api/machines/${machineId}/notes`, { path, text });
+
+                return true;
+            } catch (e) {
+                toast.error(errorMessage(e, 'Could not save the notes.'));
+
+                return false;
+            }
+        },
+        [toast],
+    );
+
+    const startSession = useCallback(async (machineId: number, req: StartSessionRequest) => {
+        const requestId = crypto.randomUUID();
+        const result = new Promise<{ id: string | null; error: string | null }>((resolve) => {
+            starts.current.set(requestId, resolve);
+            window.setTimeout(() => {
+                if (starts.current.delete(requestId)) {
+                    resolve({ id: null, error: 'The computer didn’t answer. The session may still have started.' });
+                }
+            }, 30_000);
+        });
+        try {
+            await api.post(`/api/machines/${machineId}/sessions`, { request_id: requestId, ...req });
+        } catch (e) {
+            starts.current.delete(requestId);
+            throw new Error(errorMessage(e, 'Could not reach the server.'));
+        }
+        const r = await result;
+        if (!r.id) {
+            throw new Error(r.error ?? 'The session didn’t start.');
+        }
+
+        return r.id;
+    }, []);
+
+    const moveProject = useCallback(
+        async (machineId: number, folderId: number, before: number | null) => {
+            // Shown moved straight away; the machine's list follows.
+            setProjects((all) => {
+                const mp = all[machineId];
+                if (!mp) return all;
+                const moving = mp.projects.find((p) => p.id === folderId);
+                if (!moving) return all;
+                const rest = mp.projects.filter((p) => p.id !== folderId);
+                const at = before === null ? rest.length : Math.max(0, rest.findIndex((p) => p.id === before));
+                rest.splice(at, 0, moving);
+
+                return { ...all, [machineId]: { ...mp, projects: rest } };
+            });
+            try {
+                await api.post(`/api/machines/${machineId}/projects/move`, { folder_id: folderId, before });
+            } catch (e) {
+                toast.error(errorMessage(e, 'Could not move the project.'));
+                void reload();
+            }
+        },
+        [toast, reload],
+    );
+
     const value = useMemo<Live>(
-        () => ({ connection, loaded, sessions, machines, pending, reload, act, answer, watch, input }),
-        [connection, loaded, sessions, machines, pending, reload, act, answer, watch, input],
+        () => ({ connection, loaded, sessions, machines, notes, usage, projects, pending, reload, act, answer, watch, input, resize, saveNotes, startSession, moveProject }),
+        [connection, loaded, sessions, machines, notes, usage, projects, pending, reload, act, answer, watch, input, resize, saveNotes, startSession, moveProject],
     );
 
     return <LiveContext.Provider value={value}>{children}</LiveContext.Provider>;

@@ -1,89 +1,55 @@
-import { STATUS_LABEL } from '@/lib/format';
+import { STATUS } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import type { SessionStatus } from '@/types';
 
-const PILL: Record<SessionStatus, string> = {
-    needs_you: 'bg-amber-bg text-amber-soft',
-    running: 'bg-info-bg text-info',
-    idle: 'bg-idle-bg text-dim',
-    done: 'bg-ok-bg text-ok',
-    error: 'bg-bad-bg text-bad',
-};
+/** A coloured dot plus the label, outlined in the status colour (the desktop's StatusPill). */
+export function StatusPill({ status, compact = false, className }: { status: SessionStatus; compact?: boolean; className?: string }) {
+    const st = STATUS[status];
+    const strong = status === 'needs_you' || status === 'error';
 
-const DOT: Record<SessionStatus, string> = {
-    needs_you: 'bg-amber',
-    running: 'bg-info-dot',
-    idle: 'bg-faint',
-    done: 'bg-ok-dot',
-    error: 'bg-bad-dot',
-};
-
-export function StatusPill({
-    status,
-    className,
-}: {
-    status: SessionStatus;
-    className?: string;
-}) {
     return (
         <span
-            className={cn(
-                'rounded-full px-[9px] py-[3px] text-[11px] font-semibold whitespace-nowrap',
-                PILL[status],
-                className,
-            )}
+            className={cn('pill', compact && 'compact', className)}
+            style={{ borderColor: st.color + '55', color: strong ? st.text : 'var(--color-ink-soft)' }}
         >
-            {STATUS_LABEL[status]}
+            <StatusDot status={status} />
+            {st.label}
         </span>
     );
 }
 
-export function StatusDot({
-    status,
-    className,
-}: {
-    status: SessionStatus;
-    className?: string;
-}) {
-    return (
-        <span
-            aria-hidden="true"
-            className={cn(
-                'size-2 flex-none rounded-full',
-                DOT[status],
-                className,
-            )}
-        />
-    );
+export function StatusDot({ status, className }: { status: SessionStatus; className?: string }) {
+    return <span aria-hidden="true" className={cn('dot', className)} style={{ background: STATUS[status].color }} />;
+}
+
+/** The status in its text colour, as under a session's title in the sidebar. */
+export function StatusText({ status }: { status: SessionStatus }) {
+    return <span style={{ color: STATUS[status].text }}>{STATUS[status].label}</span>;
 }
 
 export type Tone = 'ok' | 'bad' | 'off' | 'info' | 'amber';
 
 const TONE: Record<Tone, string> = {
-    ok: 'bg-ok-bg text-ok',
-    bad: 'bg-bad-bg text-bad',
-    off: 'bg-idle-bg text-dim',
-    info: 'bg-info-bg text-info',
-    amber: 'bg-amber-bg text-amber-soft',
+    ok: '#3FB950',
+    bad: '#F85149',
+    off: '#8B929C',
+    info: '#5B9BFF',
+    amber: '#F5A524',
 };
 
-export function Pill({
-    tone,
-    children,
-    className,
-}: {
-    tone: Tone;
-    children: React.ReactNode;
-    className?: string;
-}) {
+/** A pill for other states (machines, webhooks), drawn like the status pills. */
+export function Pill({ tone, children, className }: { tone: Tone; children: React.ReactNode; className?: string }) {
+    const strong = tone === 'bad' || tone === 'amber';
+
     return (
         <span
-            className={cn(
-                'rounded-full px-2.5 py-1 text-xs font-semibold whitespace-nowrap',
-                TONE[tone],
-                className,
-            )}
+            className={cn('pill compact', className)}
+            style={{
+                borderColor: TONE[tone] + '55',
+                color: strong ? (tone === 'bad' ? 'var(--color-bad)' : 'var(--color-amber-soft)') : 'var(--color-ink-soft)',
+            }}
         >
+            <span aria-hidden="true" className="dot" style={{ background: TONE[tone] }} />
             {children}
         </span>
     );

@@ -275,6 +275,26 @@ impl Hub {
 
     /// Keystrokes from a browser that watches the session.
     pub fn input(&self, conn: u64, session: &str, data: &str) -> bool {
+        self.relay_from_watcher(
+            conn,
+            session,
+            &json!({ "type": "input", "id": session, "data": data }),
+        )
+    }
+
+    /// The terminal size a watching browser wants (None: it lets go, the app's size returns).
+    pub fn resize(&self, conn: u64, session: &str, size: Option<(u16, u16)>) -> bool {
+        let msg = match size {
+            Some((cols, rows)) => {
+                json!({ "type": "resize", "id": session, "cols": cols, "rows": rows })
+            }
+            None => json!({ "type": "resize", "id": session, "release": true }),
+        };
+        self.relay_from_watcher(conn, session, &msg)
+    }
+
+    /// Passes a message to the session's machine, only from a browser that watches it.
+    fn relay_from_watcher(&self, conn: u64, session: &str, msg: &Value) -> bool {
         let g = self.lock();
         let Some((machine, set)) = g.watchers.get(session) else {
             return false;
@@ -284,10 +304,7 @@ impl Hub {
         }
         match g.machines.get(machine) {
             Some(m) => {
-                send(
-                    &m.tx,
-                    &json!({ "type": "input", "id": session, "data": data }),
-                );
+                send(&m.tx, msg);
                 true
             }
             None => false,

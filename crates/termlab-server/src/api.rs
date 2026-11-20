@@ -28,12 +28,16 @@ pub fn routes() -> Router<AppRef> {
         .route("/api/sessions/{id}/message", post(message))
         .route("/api/sessions/{id}/stop", post(stop))
         .route("/api/sessions/{id}/hold", post(hold))
+        .route("/api/sessions/{id}/unhold", post(unhold))
+        .route("/api/machines/{id}/sessions", post(start_session))
+        .route("/api/machines/{id}/projects/move", post(move_project))
         .route("/api/machines", get(machines))
         .route("/api/pairing-codes", post(pairing_code))
         .route(
             "/api/machines/{id}",
             patch(rename_machine).delete(remove_machine),
         )
+        .route("/api/machines/{id}/notes", axum::routing::put(save_notes))
         .route("/api/webhooks", get(webhooks).post(create_webhook))
         .route(
             "/api/webhooks/{id}",
@@ -243,7 +247,7 @@ async fn logout(State(app): State<AppRef>, owner: Option<Owner>) -> ApiResult<Re
 
 async fn overview(State(app): State<AppRef>, _o: Owner) -> ApiResult<Json<Value>> {
     Ok(Json(
-        json!({ "machines": sessions::machines(&app)?, "sessions": sessions::all(&app)? }),
+        json!({ "machines": sessions::machines(&app)?, "sessions": sessions::all(&app)?, "notes": sessions::notes(&app)?, "usage": sessions::usage(&app)?, "projects": sessions::projects(&app)? }),
     ))
 }
 
@@ -363,6 +367,129 @@ async fn hold(
     command(&app, &owner, &id, "hold", json!({}), None)
 }
 
+async fn unhold(
+    State(app): State<AppRef>,
+    owner: Owner,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    command(&app, &owner, &id, "unhold", json!({}), None)
+}
+
+#[derive(Deserialize)]
+struct StartSession {
+    request_id: String,
+    folder_id: i64,
+    agent: String,
+    permission: String,
+    model: Option<String>,
+    message: Option<String>,
+}
+
+/// Starts a new session on a machine, in one of its projects, with an agent installed there.
+async fn start_session(
+    State(app): State<AppRef>,
+    owner: Owner,
+    Path(id): Path<i64>,
+    Json(b): Json<StartSession>,
+) -> ApiResult<Response> {
+    let known = sessions::machine_projects(&app, id);
+    let project = known["projects"]
+        .as_array()
+        .and_then(|l| {
+            l.iter()
+                .find(|p| p["id"].as_i64() == Some(b.folder_id))
+                .cloned()
+        })
+        .ok_or_else(|| ApiError::bad("That project isn't on this computer."))?;
+    let agent = known["agents"]
+        .as_array()
+        .and_then(|l| {
+            l.iter()
+                .find(|a| a["agent"].as_str() == Some(b.agent.as_str()))
+                .cloned()
+        })
+        .ok_or_else(|| ApiError::bad("That agent isn't installed on this computer."))?;
+    if !matches!(
+        b.permission.as_str(),
+        "ask_first" | "auto_edit" | "full_auto"
+    ) {
+        return Err(ApiError::bad("Unknown permission setting."));
+    }
+    if b.request_id.len() > 64 || b.message.as_ref().is_some_and(|m| m.len() > 20_000) {
+        return Err(ApiError::bad("The first message is too long."));
+    }
+    let machine: String = app
+        .db
+        .with(|c| {
+            c.query_row("select name from machines where id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()
+        })?
+        .ok_or_else(ApiError::not_found)?;
+    if !app.hub.machine_online(id) {
+        return Err(ApiError::conflict(format!("{machine} is offline.")));
+    }
+    let detail = format!(
+        "{} in {} ({})",
+        agent["name"].as_str().unwrap_or(&b.agent),
+        project["name"].as_str().unwrap_or_default(),
+        b.permission
+    );
+    notify::audit(
+        &app,
+        "session.start",
+        Some(&detail),
+        Some(&machine),
+        None,
+        &owner.ip,
+    );
+    let sent = app.hub.to_machine(
+        id,
+        &json!({
+            "type": "session.start", "request_id": b.request_id, "folder_id": b.folder_id,
+            "agent": b.agent, "permission": b.permission, "model": b.model, "message": b.message,
+        }),
+    );
+    if !sent {
+        return Err(ApiError::conflict(format!("{machine} is offline.")));
+    }
+    Ok(accepted(json!({})))
+}
+
+#[derive(Deserialize)]
+struct MoveProject {
+    folder_id: i64,
+    /// The project it goes before; none puts it last.
+    before: Option<i64>,
+}
+
+/// Reorders a machine's projects (Termlab's sidebar order, shared with the app).
+async fn move_project(
+    State(app): State<AppRef>,
+    _o: Owner,
+    Path(id): Path<i64>,
+    Json(b): Json<MoveProject>,
+) -> ApiResult<Response> {
+    let known = sessions::machine_projects(&app, id);
+    let has = |f: i64| {
+        known["projects"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|p| p["id"].as_i64() == Some(f)))
+    };
+    if !has(b.folder_id) || b.before.is_some_and(|f| !has(f)) {
+        return Err(ApiError::not_found());
+    }
+    let sent = app.hub.to_machine(
+        id,
+        &json!({ "type": "project.move", "folder_id": b.folder_id, "before": b.before }),
+    );
+    if !sent {
+        return Err(ApiError::conflict("The computer is offline."));
+    }
+    Ok(accepted(json!({})))
+}
+
 // ---- machines --------------------------------------------------------------------------
 
 async fn machines(State(app): State<AppRef>, _o: Owner) -> ApiResult<Json<Value>> {
@@ -414,6 +541,46 @@ async fn pairing_code(State(app): State<AppRef>, owner: Owner) -> ApiResult<Json
 }
 
 #[derive(Deserialize)]
+struct NotesSave {
+    path: String,
+    text: String,
+}
+
+/// Saves a project's notes on the machine, which writes them and sends them back.
+async fn save_notes(
+    State(app): State<AppRef>,
+    _o: Owner,
+    Path(id): Path<i64>,
+    Json(b): Json<NotesSave>,
+) -> ApiResult<Response> {
+    if b.text.chars().count() > sessions::NOTES_MAX {
+        return Err(ApiError::bad("Notes can be up to 100,000 characters."));
+    }
+    // Only a project folder the machine reported; it checks that again.
+    let known: bool = app.db.with(|c| {
+        c.query_row(
+            "select exists(select 1 from sessions where machine_id = ?1 and json_extract(view, '$.directory') = ?2)
+                 or exists(select 1 from project_notes where machine_id = ?1 and path = ?2)",
+            (id, &b.path),
+            |r| r.get(0),
+        )
+    })?;
+    if !known {
+        return Err(ApiError::not_found());
+    }
+    let sent = app.hub.to_machine(
+        id,
+        &json!({ "type": "notes.save", "path": b.path, "text": b.text }),
+    );
+    if !sent {
+        return Err(ApiError::conflict(
+            "The computer is offline: the notes can't be saved now.",
+        ));
+    }
+    Ok(accepted(json!({})))
+}
+
+#[derive(Deserialize)]
 struct Rename {
     name: String,
 }
@@ -460,8 +627,17 @@ async fn remove_machine(
             Ok(name.map(|n| (n, ids)))
         })?
         .ok_or_else(ApiError::not_found)?;
-    app.db
-        .with(|c| c.execute("delete from machines where id = ?1", [id]))?;
+    app.db.with(|c| {
+        c.execute("delete from machines where id = ?1", [id])?;
+        c.execute(
+            "delete from meta where key in (?1, ?2, ?3)",
+            [
+                format!("notes_sync:{id}"),
+                format!("usage:{id}"),
+                format!("projects:{id}"),
+            ],
+        )
+    })?;
     app.hub.revoke_machine(id);
     for sid in session_ids {
         app.hub

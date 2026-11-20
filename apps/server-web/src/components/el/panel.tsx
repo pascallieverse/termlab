@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { cn } from '@/lib/utils';
 
-/** The bordered card used across the account pages. */
+/** The bordered card used across the pages (the desktop's settings card). */
 export function Panel({
     title,
     titleId,
@@ -23,13 +23,13 @@ export function Panel({
         <Tag
             aria-labelledby={title && titleId ? titleId : undefined}
             className={cn(
-                'overflow-hidden rounded-[14px] border border-line bg-panel',
+                'overflow-hidden rounded-[10px] border border-line bg-surface',
                 className,
             )}
         >
             {title && (
-                <div className="flex items-center justify-between gap-3 border-b border-line px-5 py-[18px]">
-                    <h2 id={titleId} className="m-0 text-[17px] font-semibold">
+                <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
+                    <h2 id={titleId} className="m-0 text-sm font-semibold">
                         {title}
                     </h2>
                     {actions}
@@ -54,22 +54,22 @@ export function StatCard({
     return (
         <div
             className={cn(
-                'flex flex-col gap-1.5 rounded-[14px] border p-5',
+                'flex flex-col gap-1 rounded-[10px] border p-4',
                 highlight
                     ? 'border-amber-line bg-amber-panel'
-                    : 'border-line bg-panel',
+                    : 'border-line bg-surface',
             )}
         >
             <span
                 className={cn(
-                    'text-[13px]',
+                    'text-xs',
                     highlight ? 'text-amber-soft' : 'text-dim',
                 )}
             >
                 {label}
             </span>
-            <span className="font-display text-2xl font-semibold">{value}</span>
-            {footer && <span className="text-[13px] text-dim">{footer}</span>}
+            <span className="text-xl font-semibold">{value}</span>
+            {footer && <span className="text-xs text-dim">{footer}</span>}
         </div>
     );
 }

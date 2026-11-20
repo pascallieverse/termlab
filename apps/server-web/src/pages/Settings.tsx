@@ -1,26 +1,33 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { Navigate, useLocation } from 'react-router-dom';
 import { useAppState } from '@/app-state';
 import { Button } from '@/components/el/button';
 import { useToast } from '@/components/el/toast';
 import { PushToggle } from '@/components/push-toggle';
-import { AppShell, PageHeader } from '@/layouts/AppShell';
+import { useNarrow } from '@/components/remote/use-narrow';
 import { TotpQr } from '@/layouts/AuthLayout';
+import { SettingsLayout, SettingsPhoneList, SettingsPhoneSection, type SettingsSection } from '@/layouts/SettingsLayout';
 import { api, errorMessage } from '@/lib/api';
 import { formatDate, timeAgo } from '@/lib/format';
 import type { AuditEntry, DeviceSession, TotpEnrolment } from '@/types';
+import { MachinesSection } from './Machines';
+import { AboutSection } from './settings/About';
+import { AppearanceSection } from './settings/Appearance';
+import { WebhooksSection } from './Webhooks';
 
 const inputClass = 'min-h-11 w-full rounded-[9px] border border-line-strong bg-bg px-3 text-ink';
 
-function Section({ id, title, description, children }: { id: string; title: string; description?: ReactNode; children: ReactNode }) {
+/** A titled group of settings, as in the desktop app: a small heading over a card. */
+export function Section({ id, title, description, children }: { id: string; title: string; description?: ReactNode; children: ReactNode }) {
     return (
-        <section aria-labelledby={id} className="flex flex-col gap-4 rounded-[14px] border border-line bg-panel p-5">
-            <div className="flex flex-col gap-1">
-                <h2 id={id} className="m-0 text-[17px] font-semibold">
-                    {title}
-                </h2>
-                {description && <p className="m-0 text-sm text-dim">{description}</p>}
+        <section aria-labelledby={id} className="settings-group">
+            <h3 id={id} className="section-heading">
+                {title}
+            </h3>
+            <div className="settings-card settings-block">
+                {description && <p className="m-0 text-[13px] leading-relaxed text-dim">{description}</p>}
+                {children}
             </div>
-            {children}
         </section>
     );
 }
@@ -38,21 +45,67 @@ function Input(props: React.InputHTMLAttributes<HTMLInputElement> & { label: str
     );
 }
 
-export default function Settings() {
-    const { state } = useAppState();
+// Settings, in the desktop app's shape: a list of sections, one open at a time
+// (/settings/<id>). On phones /settings is the list and each section opens on its own.
+const SECTIONS = [
+    { id: 'machines', label: 'Machines', icon: 'machines', desc: 'Computers running Termlab that are linked to this server.' },
+    { id: 'webhooks', label: 'Webhooks', icon: 'webhooks', desc: 'Signed POST requests when your Termlab sessions change.' },
+    { id: 'notifications', label: 'Notifications', icon: 'bell', desc: 'A notification on your phone or computer when a session needs you or fails.' },
+    { id: 'appearance', label: 'Appearance', icon: 'palette', desc: 'The theme of this page and its terminals, and the terminal text, in this browser.' },
+    { id: 'account', label: 'Account', icon: 'account', desc: 'Password, authenticator app and the devices signed in.' },
+    { id: 'audit', label: 'Audit log', icon: 'audit', desc: 'Sign-ins and everything done to your sessions from this server.' },
+    { id: 'about', label: 'About', icon: 'info', desc: 'Version, license and source code.' },
+] satisfies SettingsSection[];
 
-    return (
-        <AppShell>
-            <PageHeader title="Settings" description={`${state.server_name || 'Termlab Server'} · version ${state.version}`} />
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(min(380px,100%),1fr))] items-start gap-5">
-                <PasswordSection />
-                <TotpSection />
-                <NotificationsSection />
-                <DevicesSection />
-            </div>
-            <AuditSection />
-            <SignOut />
-        </AppShell>
+type SectionId = (typeof SECTIONS)[number]['id'];
+
+function SectionBody({ id }: { id: SectionId }) {
+    switch (id) {
+        case 'machines':
+            return <MachinesSection />;
+        case 'webhooks':
+            return <WebhooksSection />;
+        case 'notifications':
+            return <NotificationsSection />;
+        case 'appearance':
+            return <AppearanceSection />;
+        case 'account':
+            return (
+                <>
+                    <PasswordSection />
+                    <TotpSection />
+                    <DevicesSection />
+                    <SignOut />
+                </>
+            );
+        case 'audit':
+            return <AuditSection />;
+        case 'about':
+            return <AboutSection />;
+    }
+}
+
+export default function Settings() {
+    // /settings or /settings/<section> (Settings is drawn over the sessions, outside a route).
+    const section = useLocation().pathname.split('/')[2] || undefined;
+    const narrow = useNarrow();
+    const current = SECTIONS.find((s) => s.id === section);
+
+    if (section && !current) {
+        return <Navigate to="/settings" replace />;
+    }
+    if (!current) {
+        return narrow ? <SettingsPhoneList sections={SECTIONS} /> : <Navigate to="/settings/machines" replace />;
+    }
+
+    const body = <SectionBody id={current.id} />;
+
+    return narrow ? (
+        <SettingsPhoneSection current={current}>{body}</SettingsPhoneSection>
+    ) : (
+        <SettingsLayout sections={SECTIONS} current={current}>
+            {body}
+        </SettingsLayout>
     );
 }
 
@@ -208,14 +261,10 @@ function NotificationsSection() {
     }, [load]);
 
     return (
-        <Section
-            id="push-heading"
-            title="Notifications"
-            description="A notification on your phone or computer when a session needs you or fails."
-        >
+        <Section id="push-heading" title="This device">
             <PushToggle onChange={() => void load()} />
             {devices.length > 0 && (
-                <ul className="m-0 flex list-none flex-col divide-y divide-line-soft rounded-[10px] border border-line p-0">
+                <ul className="m-0 flex list-none flex-col divide-y divide-line-soft rounded-[10px] border border-line p-0" aria-label="Devices that get notifications">
                     {devices.map((d) => (
                         <li key={d.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
                             <span className="flex min-w-0 flex-col">
@@ -375,13 +424,7 @@ function AuditSection() {
     }, [load]);
 
     return (
-        <section aria-labelledby="audit-heading" className="overflow-hidden rounded-[14px] border border-line bg-panel">
-            <div className="flex flex-col gap-1 border-b border-line px-5 py-[18px]">
-                <h2 id="audit-heading" className="m-0 text-[17px] font-semibold">
-                    Audit log
-                </h2>
-                <p className="m-0 text-sm text-dim">Sign-ins and everything done to your sessions from this server.</p>
-            </div>
+        <section aria-label="Audit log" className="settings-card">
             {entries.length === 0 ? (
                 <p className="m-0 px-5 py-6 text-dim">{loading ? 'Loading…' : 'Nothing yet.'}</p>
             ) : (
@@ -431,7 +474,7 @@ function SignOut() {
     const toast = useToast();
 
     return (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-line bg-panel px-5 py-4">
+        <div className="settings-card flex flex-wrap items-center justify-between gap-3 px-4 py-3">
             <span className="text-sm text-dim">Sign out of this browser.</span>
             <Button
                 variant="outline"

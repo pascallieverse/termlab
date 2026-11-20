@@ -3,7 +3,7 @@ import { Button } from '@/components/el/button';
 import { Panel } from '@/components/el/panel';
 import { Pill, type Tone } from '@/components/el/status';
 import { useToast } from '@/components/el/toast';
-import { AppShell, PageHeader } from '@/layouts/AppShell';
+import { HeadActions } from '@/layouts/SettingsLayout';
 import { api, errorMessage } from '@/lib/api';
 import { timeAgo } from '@/lib/format';
 import { cn } from '@/lib/utils';
@@ -21,7 +21,8 @@ const HEALTH: Record<WebhookEndpoint['health'], { label: string; tone: Tone }> =
 
 const inputClass = 'min-h-11 rounded-[9px] border border-line-strong bg-bg px-3 text-ink';
 
-export default function Webhooks() {
+/** Settings › Webhooks. */
+export function WebhooksSection() {
     const toast = useToast();
     const [endpoints, setEndpoints] = useState<WebhookEndpoint[] | null>(null);
     const [events, setEvents] = useState<EventOption[]>([]);
@@ -73,16 +74,12 @@ export default function Webhooks() {
     }
 
     return (
-        <AppShell>
-            <PageHeader
-                title="Webhooks"
-                description="Signed POST requests when your Termlab sessions change."
-                actions={
-                    <Button aria-expanded={showForm} aria-controls="new-endpoint" onClick={() => setShowForm(!showForm)}>
-                        {showForm ? 'Close form' : 'Add endpoint'}
-                    </Button>
-                }
-            />
+        <>
+            <HeadActions>
+                <Button aria-expanded={showForm} aria-controls="new-endpoint" onClick={() => setShowForm(!showForm)}>
+                    {showForm ? 'Close form' : 'Add endpoint'}
+                </Button>
+            </HeadActions>
 
             {showForm && (
                 <NewEndpointForm
@@ -162,7 +159,7 @@ export default function Webhooks() {
                     />
                 </div>
             )}
-        </AppShell>
+        </>
     );
 }
 

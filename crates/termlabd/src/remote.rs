@@ -6,7 +6,13 @@
 //!   and fires webhooks and phone notifications;
 //! - commands (answer, message, stop, hold) come down, audited by the server first;
 //! - a session's terminal streams only while someone watches it in a browser, and their
-//!   keystrokes come back.
+//!   keystrokes come back. While a browser shows it, it can take the terminal's size (the
+//!   app's view then shows the smaller screen); the app's size returns when it lets go;
+//! - project notes go up when they change, and edits made in the browser come back;
+//! - plan usage (how much of each agent's subscription limits is used) goes up when it
+//!   changes;
+//! - the project list (in the sidebar's order) and the installed agents go up, so the browser
+//!   can start sessions and reorder projects; both act here, so the app sees them at once.
 //!
 //! The protocol is in `docs/server-protocol.md`.
 
@@ -22,12 +28,13 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use termlab_core::ipc::replay_prefix;
+use termlab_core::model::{AgentId, PermissionPreset, TermSize};
 use termlab_core::model::{
     ApprovalChoice, Folder, FolderId, PromptKind, SessionId, SessionOrigin, SessionView, now_ms,
 };
 use termlab_core::pty::PtyEvent;
 use termlab_core::remote::{PairRequest, RemoteControl, RemoteFuture, RemoteState, RemoteStatus};
-use termlab_core::{CoreEvent, DataDirs, Termlab, git};
+use termlab_core::{CoreEvent, DataDirs, StartRequest, Termlab, git, notes};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
@@ -50,6 +57,10 @@ const OUTPUT_BATCH: Duration = Duration::from_millis(30);
 /// How much scrollback a viewer gets when they open a terminal.
 const SNAPSHOT_MAX: usize = 512 * 1024;
 const BRANCH_TTL: Duration = Duration::from_secs(60);
+/// How often the notes file is checked for saves made in the app.
+const NOTES_TICK: Duration = Duration::from_secs(2);
+/// The longest notes the server takes for one project.
+const NOTES_MAX: usize = 100_000;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// What pairing returned; kept in `<data-dir>/remote.json` (mode 0600).
@@ -88,6 +99,8 @@ struct Inner {
 pub struct Bridge {
     tl: Arc<Termlab>,
     path: PathBuf,
+    /// Termlab's data folder, which holds the project notes.
+    data_dir: PathBuf,
     http: reqwest::Client,
     default_name: String,
     os: String,
@@ -118,6 +131,7 @@ impl Bridge {
         Ok(Arc::new(Self {
             tl,
             path,
+            data_dir: dirs.root.clone(),
             http,
             default_name: default_machine_name(),
             os: os_description(),
@@ -253,6 +267,9 @@ impl Bridge {
         .await?;
         let mut synced: HashSet<SessionId> = HashSet::new();
         self.full_sync(&mut sink, &mut synced).await?;
+        let mut notes_at = self.send_notes(&mut sink).await?;
+        self.send_projects(&mut sink).await?;
+        let mut usage_sent = self.send_usage(&mut sink, None).await?;
         self.set_state(RemoteState::Connected, None);
         self.set_counts(synced.len(), 0);
         tracing::info!(sessions = synced.len(), "remote: connected");
@@ -260,10 +277,14 @@ impl Bridge {
         let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
         let mut core_rx = self.tl.subscribe();
         let mut forwarders: HashMap<SessionId, JoinHandle<()>> = HashMap::new();
+        // Sessions a browser resized: the size before (to give back) and the size it set.
+        let mut held: HashMap<SessionId, (Option<TermSize>, TermSize)> = HashMap::new();
         let mut dirty: HashMap<SessionId, Instant> = HashMap::new();
         let mut flush = tokio::time::interval(FLUSH_TICK);
         let mut ping = tokio::time::interval(PING);
         ping.reset();
+        let mut notes_tick = tokio::time::interval(NOTES_TICK);
+        notes_tick.reset();
 
         let result = loop {
             tokio::select! {
@@ -286,13 +307,36 @@ impl Bridge {
                                 if let Ok(att) = self.tl.attach(id) {
                                     forwarders.insert(id, spawn_forwarder(self.tl.clone(), id, att, out_tx.clone()));
                                 }
-                            } else if let Some(f) = forwarders.remove(&id) {
-                                f.abort();
+                            } else {
+                                if let Some(f) = forwarders.remove(&id) { f.abort(); }
+                                self.give_back_size(&mut held, id);
                             }
                             self.set_counts(synced.len(), forwarders.len());
                         },
                         "input" => if let (Some(id), Some(bytes)) = (id, m["data"].as_str().and_then(|d| B64.decode(d).ok())) {
                             let _ = self.tl.write(id, bytes);
+                        },
+                        "project.move" => self.move_project(&m),
+                        "session.start" => self.start_session(&m, out_tx.clone()),
+                        "notes.save" => {
+                            if let Err(e) = self.save_notes(&m).await {
+                                tracing::warn!(error = %e, "remote: notes not saved");
+                            }
+                            notes_at = self.send_notes(&mut sink).await?;
+                        }
+                        "resize" => if let Some(id) = id {
+                            if m["release"].as_bool() == Some(true) {
+                                self.give_back_size(&mut held, id);
+                            } else if let (Some(cols), Some(rows)) = (m["cols"].as_u64(), m["rows"].as_u64()) {
+                                let size = TermSize { cols: cols.clamp(20, 500) as u16, rows: rows.clamp(5, 300) as u16 };
+                                let before = match held.get(&id) {
+                                    Some((before, _)) => *before,
+                                    None => self.tl.session(id).ok().and_then(|v| v.record.term_size),
+                                };
+                                if self.tl.resize(id, size).is_ok() {
+                                    held.insert(id, (before, size));
+                                }
+                            }
                         },
                         "bye" => break Err(Fail::Revoked),
                         _ => {}
@@ -302,6 +346,7 @@ impl Bridge {
                     Ok(CoreEvent::SessionUpdated { session }) => { dirty.entry(session.record.id).or_insert_with(Instant::now); }
                     Ok(CoreEvent::SessionRemoved { id }) => {
                         dirty.remove(&id);
+                        held.remove(&id);
                         if let Some(f) = forwarders.remove(&id) { f.abort(); }
                         if synced.remove(&id) {
                             send(&mut sink, json!({ "type": "removed", "id": id.to_string() })).await?;
@@ -312,6 +357,8 @@ impl Bridge {
                         dirty.clear();
                         self.branches.lock().expect("branch lock").clear();
                         self.full_sync(&mut sink, &mut synced).await?;
+                        notes_at = self.send_notes(&mut sink).await?;
+                        self.send_projects(&mut sink).await?;
                         self.set_counts(synced.len(), forwarders.len());
                     }
                     Err(broadcast::error::RecvError::Closed) => break Ok(()),
@@ -334,6 +381,12 @@ impl Bridge {
                     }
                     self.set_counts(synced.len(), forwarders.len());
                 }
+                _ = notes_tick.tick() => {
+                    if notes::modified(&self.data_dir) != notes_at {
+                        notes_at = self.send_notes(&mut sink).await?;
+                    }
+                    usage_sent = self.send_usage(&mut sink, Some(usage_sent)).await?;
+                }
                 _ = ping.tick() => {
                     if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
                         break Err(Fail::Other("Connection lost.".into()));
@@ -349,6 +402,9 @@ impl Bridge {
 
         for (_, f) in forwarders {
             f.abort();
+        }
+        for id in held.keys().copied().collect::<Vec<_>>() {
+            self.give_back_size(&mut held, id);
         }
         result
     }
@@ -366,6 +422,204 @@ impl Bridge {
             .map(SessionId)
             .collect();
         send(sink, json!({ "type": "snapshot", "sessions": views })).await
+    }
+
+    /// A browser let go of a session's size: the app's size returns, unless the app (or
+    /// another viewer) resized it since.
+    fn give_back_size(
+        &self,
+        held: &mut HashMap<SessionId, (Option<TermSize>, TermSize)>,
+        id: SessionId,
+    ) {
+        let Some((before, set)) = held.remove(&id) else {
+            return;
+        };
+        let now = self.tl.session(id).ok().and_then(|v| v.record.term_size);
+        if let Some(before) = before
+            && now == Some(set)
+            && before != set
+        {
+            let _ = self.tl.resize(id, before);
+        }
+    }
+
+    /// Sends every project's notes (the server replaces what it had), and returns when the
+    /// notes file last changed. An unreadable file sends nothing, so the server keeps the
+    /// last good copy.
+    async fn send_notes(&self, sink: &mut WsSink) -> Result<Option<std::time::SystemTime>, Fail> {
+        let tl = self.tl.clone();
+        let dir = self.data_dir.clone();
+        let read = tokio::task::spawn_blocking(move || {
+            let at = notes::modified(&dir);
+            let all = notes::read_all(&dir)?;
+            let list: Vec<Value> = folder_map(&tl)
+                .into_values()
+                .filter_map(|f| {
+                    let path = f.path.to_string_lossy().into_owned();
+                    let n = all.get(&path)?;
+                    Some(json!({
+                        "path": path,
+                        "text": clip(&n.text, NOTES_MAX),
+                        "updated_at": n.updated_at,
+                    }))
+                })
+                .collect();
+            Ok::<_, String>((at, list))
+        })
+        .await;
+        match read {
+            Ok(Ok((at, list))) => {
+                send(sink, json!({ "type": "notes", "notes": list })).await?;
+                Ok(at)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "remote: notes not sent");
+                Ok(notes::modified(&self.data_dir))
+            }
+            Err(_) => Ok(notes::modified(&self.data_dir)),
+        }
+    }
+
+    /// Sends the plan usage when it differs from what was sent last; returns what was sent.
+    async fn send_usage(&self, sink: &mut WsSink, last: Option<String>) -> Result<String, Fail> {
+        let usage = serde_json::to_string(&self.tl.plan_usage()).unwrap_or_else(|_| "[]".into());
+        if last.as_ref() != Some(&usage) {
+            let list: Value = serde_json::from_str(&usage).unwrap_or(json!([]));
+            send(sink, json!({ "type": "usage", "usage": list })).await?;
+        }
+        Ok(usage)
+    }
+
+    /// The projects in the sidebar's order, and the agents installed here.
+    async fn send_projects(&self, sink: &mut WsSink) -> Result<(), Fail> {
+        let tl = self.tl.clone();
+        let (projects, agents) = tokio::task::spawn_blocking(move || {
+            let mut folders = tl.list_folders().unwrap_or_default();
+            folders.sort_by_key(|f| f.sort_order);
+            let projects: Vec<Value> = folders
+                .iter()
+                .map(|f| {
+                    json!({
+                        "id": f.id,
+                        "name": clip(&f.name, 200),
+                        "path": f.path.to_string_lossy(),
+                        "order": f.sort_order,
+                    })
+                })
+                .collect();
+            let agents: Vec<Value> = tl
+                .agents()
+                .into_iter()
+                .filter(|a| a.installed.is_some())
+                .map(|a| {
+                    json!({
+                        "agent": a.agent.as_str(),
+                        "name": a.name,
+                        "model_flag": a.model_flag,
+                        "models": a.model_suggestions.iter().take(20).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            (projects, agents)
+        })
+        .await
+        .unwrap_or_default();
+        send(
+            sink,
+            json!({ "type": "projects", "projects": projects, "agents": agents }),
+        )
+        .await
+    }
+
+    /// Reordering in the browser: `folder_id` goes before `before` (none: last). The app
+    /// sees the new order straight away (it's the same list).
+    fn move_project(&self, m: &Value) {
+        let Some(id) = m["folder_id"].as_i64() else {
+            return;
+        };
+        let before = m["before"].as_i64();
+        let tl = self.tl.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = tl.move_folder(id, before) {
+                tracing::warn!(error = %e, "remote: project not moved");
+            }
+        });
+    }
+
+    /// A session started from the browser: a new one only (no resume or fork), in a project
+    /// folder Termlab knows. Answers `started` (or `start_failed`) with the request's id, so
+    /// the browser can open it.
+    fn start_session(&self, m: &Value, out: mpsc::Sender<String>) {
+        let request_id = clip(m["request_id"].as_str().unwrap_or_default(), 64);
+        let folder_id = m["folder_id"].as_i64();
+        let agent = m["agent"].as_str().and_then(|a| a.parse::<AgentId>().ok());
+        let permission = m["permission"]
+            .as_str()
+            .and_then(|p| p.parse::<PermissionPreset>().ok());
+        let model = m["model"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| clip(s, 100));
+        let first_message = m["message"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| clip(s, 20_000));
+        let tl = self.tl.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = (|| {
+                let (Some(folder_id), Some(agent), Some(permission)) =
+                    (folder_id, agent, permission)
+                else {
+                    return Err("Choose a project, an agent and permissions.".to_string());
+                };
+                let req = StartRequest {
+                    folder_id,
+                    agent,
+                    model,
+                    permission,
+                    first_message,
+                    size: Some(TermSize::default()),
+                    notify: true,
+                    title: None,
+                    mode: Default::default(),
+                };
+                tl.start_session(&req, None).map_err(|e| e.to_string())
+            })();
+            let frame = match result {
+                Ok(view) => {
+                    tracing::info!(id = %view.record.id, "remote: session started");
+                    json!({ "type": "started", "request_id": request_id, "id": view.record.id.to_string() })
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "remote: session not started");
+                    json!({ "type": "start_failed", "request_id": request_id, "error": clip(&e, 500) })
+                }
+            };
+            let _ = out.blocking_send(frame.to_string());
+        });
+    }
+
+    /// Notes edited in the browser. Only for a project folder Termlab knows.
+    async fn save_notes(&self, m: &Value) -> Result<(), String> {
+        let path = m["path"].as_str().unwrap_or_default().to_string();
+        let text = m["text"].as_str().unwrap_or_default().to_string();
+        if text.len() > NOTES_MAX * 4 {
+            return Err("notes too long".into());
+        }
+        let tl = self.tl.clone();
+        let dir = self.data_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let known = folder_map(&tl)
+                .values()
+                .any(|f| f.path.to_string_lossy() == path);
+            if !known {
+                return Err(format!("not a project folder: {path}"));
+            }
+            notes::write(&dir, &path, text, now_ms()).map(|_| ())
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 
     fn run_command(&self, data: &Value) {
@@ -397,6 +651,7 @@ impl Bridge {
                     .map_err(|e| e.to_string()),
                 "stop" => tl.stop(id).map_err(|e| e.to_string()),
                 "hold" => tl.set_on_hold(id, true).map_err(|e| e.to_string()),
+                "unhold" => tl.set_on_hold(id, false).map_err(|e| e.to_string()),
                 other => Err(format!("unknown command {other}")),
             };
             match result {
@@ -494,6 +749,13 @@ impl Bridge {
         json!({
             "id": r.id.to_string(),
             "project": clip(&folder.name, 200),
+            "folder_id": folder.id,
+            "on_hold": r.on_hold,
+            // Also the key for the project's notes.
+            "directory": folder.path.to_string_lossy(),
+            // The app's project order (drag to reorder) and session order (newest first).
+            "project_order": folder.sort_order,
+            "created_at": r.created_at,
             "title": title,
             "agent": r.agent.as_str(),
             "model": v.usage.as_ref().and_then(|u| u.model.clone()).or_else(|| r.model.clone()).map(|m| clip(&m, 100)),
@@ -823,8 +1085,10 @@ fn ws_url(server_url: &str, path: &str) -> Option<reqwest::Url> {
 
 fn shown_remotely(v: &SessionView, now: i64) -> bool {
     let r = &v.record;
-    !r.on_hold
-        && (v.live || (r.origin != SessionOrigin::Imported && now - r.last_activity_at < RECENT_MS))
+    // Held sessions too, for the On hold tab, however old.
+    r.on_hold
+        || v.live
+        || (r.origin != SessionOrigin::Imported && now - r.last_activity_at < RECENT_MS)
 }
 
 fn folder_map(tl: &Termlab) -> HashMap<FolderId, Folder> {

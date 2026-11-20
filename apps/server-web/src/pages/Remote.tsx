@@ -1,27 +1,77 @@
 import { Link, useSearchParams } from 'react-router-dom';
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { PushToggle } from '@/components/push-toggle';
+import { Monogram } from '@/components/el/agent';
 import { ApprovalActions } from '@/components/el/approval-actions';
+import { Button } from '@/components/el/button';
 import { Segmented } from '@/components/el/segmented';
-import { StatusDot, StatusPill } from '@/components/el/status';
-import { TermlabIcon } from '@/components/el/logo';
+import { StatusDot, StatusPill, StatusText } from '@/components/el/status';
+import { NewSessionDialog } from '@/components/remote/new-session-dialog';
 import { SessionFocus } from '@/components/remote/session-focus';
+import { UsageChip } from '@/components/remote/usage-chip';
 import { useNarrow } from '@/components/remote/use-narrow';
-import { BottomNav, NAV } from '@/layouts/nav';
+import { BottomNav, TopBar } from '@/layouts/nav';
 import { useLive } from '@/live/LiveProvider';
-import { agentName, agentShort, timeAgo } from '@/lib/format';
+import { STATUS, agentName, relativeTime, timeAgo } from '@/lib/format';
 import { cn } from '@/lib/utils';
-import type { Machine, RemoteSession } from '@/types';
+import type { Machine, MachineProjects, RemoteSession, SessionStatus } from '@/types';
 
-type Filter = 'all' | 'attention' | 'running' | 'done';
+type Filter = 'all' | 'attention' | 'running' | 'on_hold';
 type View = 'grid' | 'focus';
 
-const FILTERS: Record<Filter, (s: RemoteSession) => boolean> = {
-    all: () => true,
-    attention: (s) => s.status === 'needs_you' || s.status === 'error',
-    running: (s) => s.status === 'running',
-    done: (s) => s.status === 'done',
+// As in the desktop app (sessionFilters.ts): held sessions are only under On hold.
+const FILTERS: Record<Filter, { label: string; test: (s: RemoteSession) => boolean }> = {
+    all: { label: 'All', test: (s) => !s.on_hold },
+    attention: { label: 'Attention', test: (s) => needsAttention(s) },
+    running: { label: 'Running', test: (s) => !s.on_hold && s.status === 'running' },
+    on_hold: { label: 'On hold', test: (s) => !!s.on_hold },
 };
+
+function needsAttention(s: RemoteSession): boolean {
+    return !s.on_hold && (s.status === 'needs_you' || s.status === 'error');
+}
+
+/** A project in the sidebar: one of a machine's folders (in Termlab's order), with its sessions. */
+type Group = {
+    key: string;
+    name: string;
+    machineId: number;
+    /** The folder's id; null for sessions from a Termlab that doesn't send its projects. */
+    folderId: number | null;
+    list: RemoteSession[];
+};
+
+/**
+ * The sidebar's projects: every project folder of the shown machine(s), in Termlab's order,
+ * also the ones without sessions, as in the app. Sessions newest first.
+ */
+function projectGroups(visible: RemoteSession[], machines: Machine[], projects: Record<number, MachineProjects>, machineId: number | 'all', keepEmpty: boolean): Group[] {
+    const out: Group[] = [];
+    const placed = new Set<string>();
+    const newest = (l: RemoteSession[]) => [...l].sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0));
+    for (const m of machines) {
+        if (machineId !== 'all' && m.id !== machineId) continue;
+        const mine = visible.filter((s) => s.machine_id === m.id);
+        for (const p of projects[m.id]?.projects ?? []) {
+            const list = mine.filter((s) => (s.folder_id != null ? s.folder_id === p.id : s.project === p.name));
+            list.forEach((s) => placed.add(s.id));
+            if (list.length > 0 || keepEmpty) {
+                out.push({ key: `${m.id}:${p.id}`, name: p.name, machineId: m.id, folderId: p.id, list: newest(list) });
+            }
+        }
+        // From a Termlab that doesn't send its projects (before 0.2.9).
+        for (const [name, list] of byProject(mine.filter((s) => !placed.has(s.id)))) {
+            out.push({ key: `${m.id}:name:${name}`, name, machineId: m.id, folderId: null, list });
+        }
+    }
+
+    return out;
+}
+
+/** When the session last changed, for "2m" in the list. */
+function lastActivity(s: RemoteSession): string | null {
+    return s.status_changed_at ?? s.updated_at;
+}
 
 export default function Remote() {
     const [params] = useSearchParams();
@@ -30,137 +80,111 @@ export default function Remote() {
 
     const [machineId, setMachineId] = useState<number | 'all'>('all');
     const [filter, setFilter] = useState<Filter>('all');
-    const [selected, setSelected] = useState<string | null>(
-        params.get('session'),
-    );
-    const [view, setView] = useState<View>(
-        params.get('session') ? 'focus' : 'grid',
-    );
+    const [query, setQuery] = useState('');
+    const [selected, setSelected] = useState<string | null>(params.get('session'));
+    // Focus first, as in Termlab. On a phone the session list comes first; a session opens from there.
+    const [view, setView] = useState<View>(params.get('session') || !narrow ? 'focus' : 'grid');
 
-    const sessions = useMemo(
-        () =>
-            live.sessions.filter(
-                (s) => machineId === 'all' || s.machine_id === machineId,
-            ),
-        [live.sessions, machineId],
-    );
-    const current =
-        live.sessions.find((s) => s.id === selected) ?? sessions[0] ?? null;
-    const online = (s: RemoteSession) =>
-        live.machines.find((m) => m.id === s.machine_id)?.online ?? false;
+    const onMachine = useMemo(() => live.sessions.filter((s) => machineId === 'all' || s.machine_id === machineId), [live.sessions, machineId]);
+    const visible = useMemo(() => {
+        const q = query.trim().toLowerCase();
+
+        return onMachine.filter(
+            (s) =>
+                FILTERS[filter].test(s) &&
+                (!q || [s.title, s.project, s.machine, agentName(s.agent), s.branch ?? ''].some((v) => v.toLowerCase().includes(q))),
+        );
+    }, [onMachine, filter, query]);
+    const current = live.sessions.find((s) => s.id === selected) ?? visible[0] ?? onMachine[0] ?? null;
+    const online = (s: RemoteSession) => live.machines.find((m) => m.id === s.machine_id)?.online ?? false;
 
     const open = (s: RemoteSession) => {
         setSelected(s.id);
         setView('focus');
     };
+    const [newSession, setNewSession] = useState<{ machineId: number; folderId?: number } | 'open' | null>(null);
+    const startNew = (at?: { machineId: number; folderId?: number }) => setNewSession(at ?? 'open');
 
-    const shared = {
-        live,
-        sessions,
-        machines: live.machines,
-        machineId,
-        setMachineId,
-        open,
-        online,
-    };
+    const shared: Shared = { live, sessions: onMachine, machines: live.machines, machineId, setMachineId, open, online, startNew };
+    const dialog = (
+        <NewSessionDialog
+            open={newSession !== null}
+            onClose={() => setNewSession(null)}
+            initial={newSession && newSession !== 'open' ? newSession : machineId !== 'all' ? { machineId } : undefined}
+            onStarted={(id) => {
+                setSelected(id);
+                setView('focus');
+            }}
+        />
+    );
 
     const focus = current && (
         <SessionFocus
             key={current.id}
             session={current}
             online={online(current)}
-            lastSeen={
-                live.machines.find((m) => m.id === current.machine_id)
-                    ?.last_seen_at
-            }
+            lastSeen={live.machines.find((m) => m.id === current.machine_id)?.last_seen_at}
             pending={live.pending[current.id]}
             onAnswer={(choice) => live.answer(current, choice)}
-            onAction={(action, body, label) =>
-                live.act(current, action, body, label)
-            }
+            onAction={(action, body, label) => live.act(current, action, body, label)}
             onBack={narrow ? () => setView('grid') : undefined}
         />
     );
 
+    if (narrow) {
+        return (
+            <>
+                {view === 'focus' && focus ? <div className="flex min-h-dvh flex-col bg-bg text-sm text-ink">{focus}</div> : <PhoneLayout {...shared} />}
+                {dialog}
+            </>
+        );
+    }
+
     return (
         <>
-            {narrow ? (
-                view === 'focus' && focus ? (
-                    <div className="flex min-h-screen flex-col bg-bg text-sm text-ink">
-                        {focus}
-                    </div>
-                ) : (
-                    <PhoneLayout {...shared} />
-                )
-            ) : (
-                <DesktopLayout
-                    {...shared}
-                    filter={filter}
-                    setFilter={setFilter}
-                    view={view}
-                    setView={setView}
-                    current={current}
-                    focus={focus}
-                />
-            )}
+        {dialog}
+        <DesktopLayout
+            {...shared}
+            visible={visible}
+            filter={filter}
+            setFilter={setFilter}
+            query={query}
+            setQuery={setQuery}
+            view={view}
+            setView={setView}
+            current={current}
+            focus={focus}
+        />
         </>
     );
 }
 
 type Shared = {
     live: ReturnType<typeof useLive>;
+    /** The sessions on the chosen machine(s), before the filter. */
     sessions: RemoteSession[];
     machines: Machine[];
     machineId: number | 'all';
     setMachineId: (id: number | 'all') => void;
     open: (s: RemoteSession) => void;
     online: (s: RemoteSession) => boolean;
+    /** Opens the New session dialog, optionally on a machine's project. */
+    startNew: (at?: { machineId: number; folderId?: number }) => void;
 };
 
-function MachineSelect({
-    machines,
-    machineId,
-    setMachineId,
-    compact = false,
-}: Pick<Shared, 'machines' | 'machineId' | 'setMachineId'> & {
-    compact?: boolean;
-}) {
+/** Which machine's sessions to show: a header chip. */
+function MachineSelect({ machines, machineId, setMachineId }: Pick<Shared, 'machines' | 'machineId' | 'setMachineId'>) {
     const selectedMachine = machines.find((m) => m.id === machineId);
-    const dotOn = selectedMachine
-        ? selectedMachine.online
-        : machines.some((m) => m.online);
+    const on = selectedMachine ? selectedMachine.online : machines.some((m) => m.online);
 
     return (
-        <label
-            className={cn(
-                'flex items-center gap-2 text-dim',
-                compact &&
-                    'rounded-full border border-line-strong bg-panel pl-3 text-[13px]',
-            )}
-        >
+        <label className="hchip relative gap-2 pr-1.5 focus-within:border-outline-strong">
             <span className="sr-only">Machine</span>
-            <span
-                aria-hidden="true"
-                className={cn(
-                    'size-2 rounded-full',
-                    dotOn ? 'bg-ok' : 'bg-faint',
-                )}
-            />
+            <span aria-hidden="true" className="dot" style={{ background: on ? '#3FB950' : '#8B929C' }} />
             <select
                 value={machineId}
-                onChange={(e) =>
-                    setMachineId(
-                        e.target.value === 'all'
-                            ? 'all'
-                            : Number(e.target.value),
-                    )
-                }
-                className={cn(
-                    'min-h-9 cursor-pointer text-ink',
-                    compact
-                        ? 'rounded-full bg-transparent pr-3'
-                        : 'rounded-lg border border-line-strong bg-panel px-2.5',
-                )}
+                onChange={(e) => setMachineId(e.target.value === 'all' ? 'all' : Number(e.target.value))}
+                className="max-w-[180px] cursor-pointer appearance-none bg-transparent pr-5 text-ink-soft outline-none"
             >
                 <option value="all">All machines</option>
                 {machines.map((m) => (
@@ -170,68 +194,82 @@ function MachineSelect({
                     </option>
                 ))}
             </select>
+            <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="pointer-events-none absolute right-2.5 text-faint">
+                <path d="m6 9 6 6 6-6" />
+            </svg>
         </label>
     );
 }
 
-function ConnectionBadge() {
-    const status = useLive().connection;
-    const ok = status === 'connected';
-
+function PlusIcon() {
     return (
-        <span className="flex items-center gap-1.5 font-mono text-xs text-dim">
-            <span
-                aria-hidden="true"
-                className={cn(
-                    'size-1.5 rounded-full',
-                    ok ? 'bg-ok' : 'bg-amber',
-                )}
-            />
-            {ok ? 'connected' : status}
-        </span>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+            <path d="M12 5v14M5 12h14" />
+        </svg>
     );
 }
 
-/** The other sections, next to the connection badge on wide screens. */
-function SectionLinks() {
+function FolderIcon({ size = 15 }: { size?: number }) {
     return (
-        <nav aria-label="Sections" className="flex items-center gap-1">
-            {NAV.filter((n) => n.to !== '/remote').map((n) => (
-                <Link
-                    key={n.to}
-                    to={n.to}
-                    className="rounded-lg px-2.5 py-1.5 text-[13px] text-dim no-underline hover:bg-raised hover:text-ink"
-                >
-                    {n.label}
-                </Link>
-            ))}
-        </nav>
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M3 6h6l2 2h10v11H3z" />
+        </svg>
     );
 }
 
-function EmptyState({ machines }: { machines: Machine[] }) {
+function EmptyState({ machines, filtered }: { machines: Machine[]; filtered: boolean }) {
     return (
-        <div className="m-5 flex flex-col items-center gap-2 rounded-2xl border border-dashed border-line-strong px-5 py-10 text-center">
-            <span className="font-semibold">
-                {machines.length === 0
-                    ? 'No machines paired yet'
-                    : 'No sessions here'}
-            </span>
-            <span className="max-w-[44ch] text-sm text-dim">
+        <div className="empty">
+            <h2>{machines.length === 0 ? 'No machines paired yet' : filtered ? 'Nothing matches' : 'No sessions here'}</h2>
+            <p>
                 {machines.length === 0 ? (
                     <>
-                        Pair Termlab on the{' '}
-                        <Link to="/machines" className="text-amber">
-                            Machines
-                        </Link>{' '}
-                        page, then its sessions show up here.
+                        Pair Termlab on the <Link to="/settings/machines">Machines</Link> settings, then its sessions show up here.
                     </>
+                ) : filtered ? (
+                    'Try another filter, or clear the search.'
                 ) : (
                     'Sessions that Termlab runs on your machines appear here as soon as they start.'
                 )}
-            </span>
+            </p>
         </div>
     );
+}
+
+/** "1 running · 1 need attention", as under a project's name. */
+function summary(list: RemoteSession[]): string {
+    const n = (st: SessionStatus) => list.filter((s) => s.status === st).length;
+    const parts: string[] = [];
+    if (n('running')) parts.push(`${n('running')} running`);
+    if (n('needs_you') + n('error')) parts.push(`${n('needs_you') + n('error')} need attention`);
+    if (n('idle')) parts.push(`${n('idle')} idle`);
+    if (n('done')) parts.push(`${n('done')} done`);
+
+    return parts.join(' · ') || 'no sessions';
+}
+
+/** Grouped by project in Termlab's sidebar order, newest session first, as in the app. */
+function byProject(list: RemoteSession[]): [string, RemoteSession[]][] {
+    const groups = new Map<string, RemoteSession[]>();
+    for (const s of list) {
+        groups.set(s.project, [...(groups.get(s.project) ?? []), s]);
+    }
+    const order = (l: RemoteSession[]) => Math.min(...l.map((s) => s.project_order ?? Number.MAX_SAFE_INTEGER));
+
+    return [...groups.entries()]
+        .map(([project, l]): [string, RemoteSession[]] => [project, [...l].sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))])
+        .sort(([, a], [, b]) => order(a) - order(b));
+}
+
+function waitingText(s: RemoteSession): string {
+    if (s.status === 'error') {
+        return 'exited with an error';
+    }
+    if (s.approval?.kind === 'question') {
+        return 'has a question';
+    }
+
+    return s.approval?.detail ?? 'needs your input';
 }
 
 function DesktopLayout({
@@ -242,221 +280,294 @@ function DesktopLayout({
     setMachineId,
     open,
     online,
+    startNew,
+    visible,
     filter,
     setFilter,
+    query,
+    setQuery,
     view,
     setView,
     current,
     focus,
 }: Shared & {
+    visible: RemoteSession[];
     filter: Filter;
     setFilter: (f: Filter) => void;
+    query: string;
+    setQuery: (q: string) => void;
     view: View;
     setView: (v: View) => void;
     current: RemoteSession | null;
-    focus: React.ReactNode;
+    focus: ReactNode;
 }) {
-    const attention = sessions.filter((s) => s.status === 'needs_you').length;
-    const visible = sessions.filter(FILTERS[filter]);
-    const projects = [...new Set(sessions.map((s) => s.project))];
+    const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+    const running = sessions.filter((s) => !s.on_hold && s.status === 'running').length;
+    const waiting = sessions.filter(needsAttention);
+    const filtering = filter !== 'all' || query.trim() !== '';
+    // The sidebar lists every project (empty ones too), unless filtering; Mission control only
+    // the ones with sessions.
+    const groups = projectGroups(visible, machines, live.projects, machineId, !filtering);
+    const tiles = groups.filter((g) => g.list.length > 0);
+    const [drag, setDrag] = useState<{ machineId: number; folderId: number } | null>(null);
+    const [drop, setDrop] = useState<{ key: string; after: boolean } | null>(null);
+    const canStart = machines.some((m) => m.online && (live.projects[m.id]?.projects.length ?? 0) > 0);
+
+    /** Moves a project before another of the same machine (null: last), in Termlab too. */
+    const moveTo = (g: Group, before: number | null) => {
+        if (g.folderId === null || before === g.folderId) return;
+        void live.moveProject(g.machineId, g.folderId, before);
+    };
+    const siblings = (g: Group) => groups.filter((x) => x.machineId === g.machineId && x.folderId !== null);
+    const manyMachines = machines.length > 1 && machineId === 'all';
+    const counts = Object.fromEntries((Object.keys(FILTERS) as Filter[]).map((f) => [f, sessions.filter(FILTERS[f].test).length])) as Record<Filter, number>;
+
+    const toggle = (project: string) =>
+        setCollapsed((c) => {
+            const next = new Set(c);
+            if (next.has(project)) {
+                next.delete(project);
+            } else {
+                next.add(project);
+            }
+
+            return next;
+        });
 
     return (
-        <div className="flex h-screen flex-col overflow-hidden bg-bg text-sm leading-normal text-ink">
-            <header className="flex flex-wrap items-center gap-x-5 gap-y-2.5 border-b border-line-soft bg-surface px-4 py-2.5">
-                <Link
-                    to="/remote"
-                    className="flex items-center gap-2.5 text-ink no-underline hover:text-ink"
-                >
-                    <TermlabIcon className="size-[26px] rounded-md" />
-                    <span className="font-display text-base font-semibold">
-                        Termlab <span className="text-amber">Server</span>
-                    </span>
-                </Link>
-                <MachineSelect
-                    machines={machines}
-                    machineId={machineId}
-                    setMachineId={setMachineId}
-                />
+        <div className="flex h-dvh flex-col overflow-hidden bg-bg text-sm leading-normal text-ink">
+            <TopBar>
                 <Segmented
-                    label="Filter sessions"
-                    size="sm"
-                    value={filter}
-                    onChange={setFilter}
-                    className="rounded-[10px] p-[3px]"
+                    label="View"
+                    value={view}
+                    onChange={setView}
                     options={[
-                        { value: 'all', label: 'All' },
-                        {
-                            value: 'attention',
-                            label: `Attention · ${attention}`,
-                        },
-                        { value: 'running', label: 'Running' },
-                        { value: 'done', label: 'Done' },
+                        { value: 'focus', label: 'Focus' },
+                        { value: 'grid', label: 'Mission control' },
                     ]}
                 />
-                <div className="ml-auto flex items-center gap-3.5">
-                    <ConnectionBadge />
-                    <SectionLinks />
+                <div className="flex flex-wrap items-center gap-2">
+                    <span className="hchip">
+                        <span aria-hidden="true" className="dot" style={{ background: STATUS.running.color }} />
+                        {running} running
+                    </span>
+                    {waiting.length > 0 && (
+                        <button type="button" className="hchip amber" onClick={() => open(waiting[0])}>
+                            ▲ {waiting.length} need{waiting.length === 1 ? 's' : ''} you
+                        </button>
+                    )}
+                    <MachineSelect machines={machines} machineId={machineId} setMachineId={setMachineId} />
+                    <UsageChip />
                 </div>
-            </header>
+            </TopBar>
 
             <div className="flex min-h-0 flex-1">
-                <nav
-                    aria-label="Projects"
-                    className="flex w-[250px] flex-none flex-col gap-3.5 overflow-y-auto border-r border-line-soft bg-surface px-2.5 py-3.5"
-                >
-                    {projects.length === 0 && (
-                        <span className="px-2 text-[13px] text-faint">
-                            No sessions
-                        </span>
-                    )}
-                    {projects.map((project) => {
-                        const list = sessions.filter(
-                            (s) => s.project === project,
-                        );
-                        const n = list.filter(
-                            (s) => s.status === 'needs_you',
-                        ).length;
-
-                        return (
-                            <div
-                                key={project}
-                                className="flex flex-col gap-0.5"
-                            >
-                                <div className="flex items-center justify-between px-2 py-1">
-                                    <span className="text-xs font-semibold tracking-[0.04em] text-dim uppercase">
-                                        {project}
-                                    </span>
-                                    {n > 0 && (
-                                        <span className="min-w-[18px] rounded-full bg-amber px-1.5 py-px text-center text-[11px] font-bold text-amber-ink">
-                                            {n}
+                <aside className="sidebar" aria-label="Sessions">
+                    <div className="sidebar-top">
+                        <label className="search-field">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                                <circle cx="11" cy="11" r="7" />
+                                <path d="m20 20-3.5-3.5" />
+                            </svg>
+                            <span className="sr-only">Filter sessions</span>
+                            <input type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter sessions" />
+                        </label>
+                        <div role="group" aria-label="Show" className="filter-tabs">
+                            {(Object.keys(FILTERS) as Filter[]).map((key) => (
+                                <button key={key} type="button" className={cn(filter === key && 'on')} aria-pressed={filter === key} onClick={() => setFilter(key)}>
+                                    {FILTERS[key].label}
+                                    {counts[key] > 0 && (
+                                        <span aria-hidden="true" className={cn('filter-count', key === 'attention' && 'hot')}>
+                                            {counts[key]}
                                         </span>
                                     )}
-                                </div>
-                                {list.map((s) => {
-                                    const isCur =
-                                        view === 'focus' &&
-                                        current?.id === s.id;
-
-                                    return (
-                                        <button
-                                            key={s.id}
-                                            type="button"
-                                            onClick={() => open(s)}
-                                            aria-current={
-                                                isCur ? 'true' : undefined
-                                            }
-                                            className={cn(
-                                                'flex min-h-9 w-full cursor-pointer items-center gap-2.5 rounded-[7px] px-2 text-left text-[13px] text-ink',
-                                                isCur
-                                                    ? 'bg-raised'
-                                                    : 'hover:bg-raised/60',
-                                            )}
-                                        >
-                                            <StatusDot status={s.status} />
-                                            <span className="min-w-0 flex-1 truncate">
-                                                {s.title}
-                                            </span>
-                                            <span className="text-[11px] text-dim">
-                                                {agentShort(s.agent)}
-                                            </span>
-                                        </button>
-                                    );
-                                })}
-                            </div>
-                        );
-                    })}
-                </nav>
-
-                <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
-                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line-soft px-5 py-3.5">
-                        <Segmented
-                            label="View"
-                            size="sm"
-                            value={view}
-                            onChange={setView}
-                            className="rounded-[10px] p-[3px]"
-                            options={[
-                                { value: 'grid', label: 'Mission control' },
-                                { value: 'focus', label: 'Focus' },
-                            ]}
-                        />
-                        <span className="text-dim">
-                            {sessions.length} sessions · {attention} waiting on
-                            you
-                        </span>
+                                    <span className="sr-only">({counts[key]})</span>
+                                </button>
+                            ))}
+                        </div>
                     </div>
+                    <div className="sidebar-list">
+                        <div className="list-head">
+                            <span className="section-heading">Projects</span>
+                            {canStart && (
+                                <button type="button" className="icon-btn list-head-btn" aria-label="New session" title="New session" onClick={() => startNew()}>
+                                    <PlusIcon />
+                                </button>
+                            )}
+                        </div>
+                        {groups.length === 0 && <p className="sidebar-note">{sessions.length === 0 ? 'No sessions yet.' : 'No sessions match.'}</p>}
+                        {groups.map((g) => {
+                            const { key, name: project, list } = g;
+                            const isOpen = !collapsed.has(key);
+                            const attention = list.filter(needsAttention).length;
+                            const id = `project-${key.replace(/[^a-z0-9]+/gi, '-')}`;
+                            const movable = g.folderId !== null && !filtering && (live.machines.find((m) => m.id === g.machineId)?.online ?? false);
+                            const sameMachine = drag !== null && drag.machineId === g.machineId && g.folderId !== null;
 
-                    {view === 'grid' || !focus ? (
-                        visible.length === 0 ? (
-                            <EmptyState machines={machines} />
-                        ) : (
-                            <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] content-start gap-3.5 p-5">
-                                {visible.map((s) => (
-                                    <article
-                                        key={s.id}
-                                        className={cn(
-                                            'flex flex-col gap-2.5 rounded-xl border bg-panel p-3.5',
-                                            s.status === 'needs_you'
-                                                ? 'border-amber-line'
-                                                : 'border-line',
+                            return (
+                                <div
+                                    key={key}
+                                    className={cn('folder-group', drag?.folderId === g.folderId && drag?.machineId === g.machineId && 'is-dragging', drop?.key === key && (drop.after ? 'drop-after' : 'drop-before'))}
+                                    onDragOver={(e) => {
+                                        if (!sameMachine) return;
+                                        e.preventDefault();
+                                        const r = e.currentTarget.getBoundingClientRect();
+                                        setDrop({ key, after: e.clientY > r.top + r.height / 2 });
+                                    }}
+                                    onDragLeave={(e) => {
+                                        if (!e.currentTarget.contains(e.relatedTarget as Node)) setDrop((d) => (d?.key === key ? null : d));
+                                    }}
+                                    onDrop={(e) => {
+                                        e.preventDefault();
+                                        const moving = drag && groups.find((x) => x.machineId === drag.machineId && x.folderId === drag.folderId);
+                                        if (moving && sameMachine && drop) {
+                                            const sib = siblings(g);
+                                            const at = sib.findIndex((x) => x.key === key);
+                                            const before = drop.after ? (sib[at + 1]?.folderId ?? null) : g.folderId;
+                                            moveTo(moving, before);
+                                        }
+                                        setDrag(null);
+                                        setDrop(null);
+                                    }}
+                                >
+                                    <div className="folder-head">
+                                        {movable && (
+                                            <button
+                                                type="button"
+                                                className="folder-grip"
+                                                draggable
+                                                aria-label={`Move ${project}`}
+                                                title="Drag to reorder (or Alt+↑/↓)"
+                                                onDragStart={(e) => {
+                                                    e.dataTransfer.effectAllowed = 'move';
+                                                    e.dataTransfer.setData('text/plain', project);
+                                                    setDrag({ machineId: g.machineId, folderId: g.folderId! });
+                                                }}
+                                                onDragEnd={() => {
+                                                    setDrag(null);
+                                                    setDrop(null);
+                                                }}
+                                                onKeyDown={(e) => {
+                                                    if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+                                                    e.preventDefault();
+                                                    const sib = siblings(g);
+                                                    const at = sib.findIndex((x) => x.key === key);
+                                                    if (e.key === 'ArrowUp' && at > 0) moveTo(g, sib[at - 1].folderId);
+                                                    if (e.key === 'ArrowDown' && at < sib.length - 1) moveTo(g, sib[at + 2]?.folderId ?? null);
+                                                }}
+                                            >
+                                                <svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor" aria-hidden="true">
+                                                    {[2, 7, 12].flatMap((y) => [<circle key={`a${y}`} cx="2.5" cy={y} r="1.3" />, <circle key={`b${y}`} cx="7.5" cy={y} r="1.3" />])}
+                                                </svg>
+                                            </button>
                                         )}
-                                    >
-                                        <button
-                                            type="button"
-                                            onClick={() => open(s)}
-                                            className="flex min-h-11 cursor-pointer flex-col gap-1 text-left text-ink"
-                                        >
-                                            <span className="flex w-full items-center justify-between gap-2">
-                                                <span className="font-semibold">
-                                                    {s.title}
+                                        <button type="button" className="folder-toggle" aria-expanded={isOpen} aria-controls={id} onClick={() => toggle(key)}>
+                                            <span className={cn('chevron', isOpen && 'open')} aria-hidden="true">
+                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                    <path d="m9 6 6 6-6 6" />
+                                                </svg>
+                                            </span>
+                                            <span className="folder-name">{project}</span>
+                                            {manyMachines && <span className="truncate text-[11px] font-normal text-faint">{live.machines.find((m) => m.id === g.machineId)?.name}</span>}
+                                            {attention > 0 && (
+                                                <span className="folder-attention" title={`${attention} need${attention === 1 ? 's' : ''} attention`}>
+                                                    {attention}
                                                 </span>
-                                                <StatusPill status={s.status} />
-                                            </span>
-                                            <span className="text-xs text-dim">
-                                                {s.project} ·{' '}
-                                                {agentName(s.agent)}
-                                                {machineId === 'all' &&
-                                                    ` · ${s.machine}`}
-                                            </span>
-                                        </button>
-                                        <pre className="m-0 h-[78px] overflow-hidden rounded-lg border border-line-soft bg-bg p-2.5 font-mono text-xs leading-[1.6] whitespace-pre-wrap text-dim">
-                                            {s.preview
-                                                .filter((line) => line?.trim())
-                                                .slice(-3)
-                                                .join('\n') || ' '}
-                                        </pre>
-                                        {s.status === 'needs_you' &&
-                                            s.approval && (
-                                                <div className="flex flex-col gap-2">
-                                                    <span className="text-[13px] text-amber-soft">
-                                                        {s.approval.question}
-                                                    </span>
-                                                    <ApprovalActions
-                                                        size="sm"
-                                                        pending={
-                                                            online(s)
-                                                                ? live.pending[
-                                                                      s.id
-                                                                  ]
-                                                                : 'Machine offline'
-                                                        }
-                                                        onAnswer={(c) =>
-                                                            live.answer(s, c)
-                                                        }
-                                                    />
-                                                </div>
                                             )}
-                                        {!online(s) && (
-                                            <span className="text-xs text-faint">
-                                                {s.machine} is offline
-                                            </span>
+                                            <span className="folder-count">{list.length}</span>
+                                        </button>
+                                        {g.folderId !== null && canStart && (live.machines.find((m) => m.id === g.machineId)?.online ?? false) && (
+                                            <button
+                                                type="button"
+                                                className="icon-btn folder-add"
+                                                aria-label={`New session in ${project}`}
+                                                title={`New session in ${project}`}
+                                                onClick={() => startNew({ machineId: g.machineId, folderId: g.folderId! })}
+                                            >
+                                                <PlusIcon />
+                                            </button>
                                         )}
-                                    </article>
-                                ))}
-                            </div>
-                        )
-                    ) : (
+                                    </div>
+                                    {isOpen && list.length > 0 && (
+                                        <div id={id} className="folder-sessions">
+                                            {list.map((s) => {
+                                                const isCur = view === 'focus' && current?.id === s.id;
+
+                                                return (
+                                                    <button
+                                                        key={s.id}
+                                                        type="button"
+                                                        onClick={() => open(s)}
+                                                        aria-current={isCur ? 'true' : undefined}
+                                                        className={cn('session-row', isCur && 'is-selected')}
+                                                    >
+                                                        <Monogram agent={s.agent} size={24} />
+                                                        <span className="row-text">
+                                                            <span className="row-title" title={s.title}>
+                                                                {s.title}
+                                                            </span>
+                                                            <span className="row-meta">
+                                                                <StatusDot status={s.status} />
+                                                                <StatusText status={s.status} />
+                                                                {manyMachines && <span className="truncate text-faint">· {s.machine}</span>}
+                                                            </span>
+                                                        </span>
+                                                        <span className="row-time">{relativeTime(lastActivity(s))}</span>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                </aside>
+
+                <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-bg">
+                    {view === 'focus' && focus ? (
                         focus
+                    ) : (
+                        <div className="mission">
+                            {waiting.length > 0 && (
+                                <section aria-label="Needs you" className="waiting-banner">
+                                    <span className="waiting-title">
+                                        ▲ {waiting.length} session{waiting.length === 1 ? ' is' : 's are'} waiting on you
+                                    </span>
+                                    {waiting.slice(0, 3).map((s) => (
+                                        <span key={s.id} className="waiting-item">
+                                            <b>{s.project}</b> · {agentName(s.agent)} {waitingText(s)}
+                                        </span>
+                                    ))}
+                                    <div className="flex-1" />
+                                    <Button variant="amber" onClick={() => open(waiting[0])}>
+                                        Review one by one
+                                    </Button>
+                                </section>
+                            )}
+
+                            {visible.length === 0 && <EmptyState machines={machines} filtered={sessions.length > 0} />}
+
+                            {tiles.map(({ key, name: project, list }) => {
+                                const hosts = [...new Set(list.map((s) => s.machine))];
+
+                                return (
+                                    <section key={key} className="mc-group" aria-label={project}>
+                                        <div className="mc-group-head">
+                                            <FolderIcon />
+                                            <h2>{project}</h2>
+                                            {manyMachines && <span className="font-mono text-xs text-faint">{hosts.join(', ')}</span>}
+                                            <span className="text-xs text-dim">· {summary(list)}</span>
+                                        </div>
+                                        <div className="tiles">
+                                            {list.map((s) => (
+                                                <Tile key={s.id} session={s} online={online(s)} showMachine={manyMachines} live={live} open={open} />
+                                            ))}
+                                        </div>
+                                    </section>
+                                );
+                            })}
+                        </div>
                     )}
                 </main>
             </div>
@@ -464,160 +575,165 @@ function DesktopLayout({
     );
 }
 
-function PhoneLayout({
-    live,
-    sessions,
-    machines,
-    machineId,
-    setMachineId,
-    open,
+function Tile({
+    session: s,
     online,
-}: Shared) {
-    const [tab, setTab] = useState<'queue' | 'all'>('queue');
-    const queue = sessions.filter((s) => s.status === 'needs_you');
+    showMachine,
+    live,
+    open,
+}: {
+    session: RemoteSession;
+    online: boolean;
+    showMachine: boolean;
+    live: Shared['live'];
+    open: (s: RemoteSession) => void;
+}) {
+    const hot = needsAttention(s);
+    // As in Focus: an approval Termlab couldn't read the options of still takes an answer.
+    const canAllow = s.status === 'needs_you' && !!s.approval && (s.approval.options.length === 0 || s.approval.options.some((o) => o.choice === 'allow_once'));
+    const lines = s.preview.filter((line) => line?.trim()).slice(-5);
+    const pending = live.pending[s.id];
 
     return (
-        <div className="flex h-dvh flex-col overflow-hidden bg-bg text-[15px] leading-[1.45] text-ink">
-            <header className="flex flex-col gap-3.5 px-4 pt-5 pb-3">
-                <div className="flex items-center justify-between gap-3">
-                    <Link
-                        to="/remote"
-                        className="flex items-center gap-2.5 text-ink no-underline hover:text-ink"
-                    >
-                        <TermlabIcon className="size-7 rounded-[7px]" />
-                        <span className="font-display text-lg font-semibold">
-                            Termlab <span className="text-amber">Server</span>
-                        </span>
-                    </Link>
-                    <MachineSelect
-                        compact
-                        machines={machines}
-                        machineId={machineId}
-                        setMachineId={setMachineId}
-                    />
+        <article className="tile" style={{ borderColor: hot ? STATUS[s.status].color + '88' : undefined }}>
+            <div className="tile-head">
+                <Monogram agent={s.agent} size={32} />
+                <button type="button" className="tile-title" onClick={() => open(s)}>
+                    <h3 title={s.title}>{s.title}</h3>
+                    <span className="truncate text-xs text-dim">
+                        {agentName(s.agent)}
+                        {s.model ? <span className="font-mono"> · {s.model}</span> : null}
+                    </span>
+                </button>
+                <StatusPill status={s.status} compact />
+            </div>
+            <div className="tile-preview" aria-label="Last terminal lines">
+                {(lines.length ? lines : [' ']).map((line, i) => (
+                    <div key={i}>{line || ' '}</div>
+                ))}
+            </div>
+            <div className="tile-foot">
+                <span>ctx {s.context_pct ?? '—'}%</span>
+                <span>{relativeTime(lastActivity(s))}</span>
+                {showMachine && <span className="truncate">{s.machine}</span>}
+                {!online && <span className="text-faint">offline</span>}
+                <div className="flex-1" />
+                {pending ? (
+                    <span role="status">{pending}</span>
+                ) : (
+                    canAllow &&
+                    online && (
+                        <Button variant="primary" size="sm" onClick={() => live.answer(s, 'allow_once')}>
+                            Allow
+                        </Button>
+                    )
+                )}
+                <Button variant="default" size="sm" onClick={() => open(s)}>
+                    Open
+                </Button>
+            </div>
+        </article>
+    );
+}
+
+function PhoneLayout({ live, sessions, machines, machineId, setMachineId, open, online, startNew }: Shared) {
+    const [tab, setTab] = useState<'queue' | 'all'>('queue');
+    const queue = sessions.filter((s) => !s.on_hold && s.status === 'needs_you');
+    const canStart = machines.some((m) => m.online && (live.projects[m.id]?.projects.length ?? 0) > 0);
+
+    return (
+        <div className="flex h-dvh flex-col overflow-hidden bg-bg text-sm leading-normal text-ink">
+            <TopBar>
+                <div className="ml-auto flex min-w-0 items-center gap-2">
+                    <UsageChip />
+                    {canStart && (
+                        <button type="button" className="icon-btn size-11" aria-label="New session" title="New session" onClick={() => startNew()}>
+                            <PlusIcon />
+                        </button>
+                    )}
+                    {machines.length > 1 && <MachineSelect machines={machines} machineId={machineId} setMachineId={setMachineId} />}
                 </div>
+            </TopBar>
+            <div className="px-4 pt-3 pb-2">
                 <Segmented
                     label="Show"
-                    size="sm"
                     stretch
                     value={tab}
                     onChange={setTab}
-                    className="rounded-[11px] p-[3px] [&_button]:min-h-10 [&_button]:text-sm"
                     options={[
-                        {
-                            value: 'queue',
-                            label: `Needs you · ${queue.length}`,
-                        },
+                        { value: 'queue', label: `Needs you · ${queue.length}` },
                         { value: 'all', label: 'All sessions' },
                     ]}
                 />
-            </header>
+            </div>
 
             <main className="flex flex-1 flex-col gap-3 overflow-y-auto px-4 pt-1 pb-4">
                 {tab === 'queue' &&
                     queue.map((s) => (
-                        <article
-                            key={s.id}
-                            className="flex flex-col gap-3 rounded-2xl border border-amber-line bg-amber-panel p-4"
-                        >
-                            <div className="flex items-center justify-between gap-2">
-                                <span className="text-xs text-dim">
-                                    {s.project} · {agentName(s.agent)}
+                        <article key={s.id} className="flex flex-col gap-3 rounded-xl border border-amber-line bg-amber-panel p-4">
+                            <div className="flex items-center gap-2.5">
+                                <Monogram agent={s.agent} size={28} />
+                                <span className="flex min-w-0 flex-1 flex-col">
+                                    <span className="truncate text-[13px] font-semibold">{s.title}</span>
+                                    <span className="truncate text-xs text-dim">
+                                        {s.project} · {agentName(s.agent)}
+                                    </span>
                                 </span>
-                                <span className="text-[11px] text-dim">
-                                    {timeAgo(s.status_changed_at)}
-                                </span>
+                                <span className="text-[11px] text-faint">{relativeTime(lastActivity(s))}</span>
                             </div>
-                            <h2 className="m-0 text-[17px] font-semibold">
-                                {s.approval?.question ??
-                                    'Waiting for your input'}
-                            </h2>
+                            <span className="font-semibold text-amber-soft">{s.approval?.question ?? 'Waiting for your input'}</span>
                             {s.approval?.detail && (
-                                <pre className="m-0 rounded-[10px] border border-line bg-bg p-3 font-mono text-[13px] whitespace-pre-wrap text-ink-soft">
-                                    {s.approval.detail}
-                                </pre>
+                                <code className="rounded-[8px] border border-selected bg-term p-3 font-mono text-[12.5px] break-all whitespace-pre-wrap text-ink">{s.approval.detail}</code>
                             )}
                             {s.approval && (
-                                <ApprovalActions
-                                    layout="stack"
-                                    pending={
-                                        online(s)
-                                            ? live.pending[s.id]
-                                            : `${s.machine} is offline`
-                                    }
-                                    onAnswer={(c) => live.answer(s, c)}
-                                />
+                                <ApprovalActions layout="stack" pending={online(s) ? live.pending[s.id] : `${s.machine} is offline`} onAnswer={(c) => live.answer(s, c)} />
                             )}
-                            <button
-                                type="button"
-                                onClick={() => open(s)}
-                                className="cursor-pointer py-1.5 text-center text-sm text-amber hover:text-amber-soft"
-                            >
+                            <Button variant="ghost" onClick={() => open(s)}>
                                 Open terminal
-                            </button>
+                            </Button>
                         </article>
                     ))}
 
                 {tab === 'queue' && queue.length === 0 && (
-                    <div className="flex flex-col items-center gap-1.5 rounded-2xl border border-dashed border-line-strong px-5 py-8 text-center">
-                        <svg
-                            width="28"
-                            height="28"
-                            viewBox="0 0 24 24"
-                            aria-hidden="true"
-                            fill="none"
-                            stroke="#8EE6B4"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                        >
+                    <div className="flex flex-col items-center gap-1.5 rounded-xl border border-dashed border-line-strong px-5 py-8 text-center">
+                        <svg width="28" height="28" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#3FB950" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                             <path d="M5 12.5l4.5 4.5L19 7.5" />
                         </svg>
-                        <span className="font-semibold">
-                            Nothing waiting on you
-                        </span>
-                        <span className="text-sm text-dim">
-                            We will notify you when a session needs you.
-                        </span>
+                        <span className="font-semibold">Nothing waiting on you</span>
+                        <span className="text-[13px] text-dim">We will notify you when a session needs you.</span>
                         <PushToggle compact className="mt-2" />
                     </div>
                 )}
 
                 {tab === 'all' &&
                     (sessions.length === 0 ? (
-                        <EmptyState machines={machines} />
+                        <EmptyState machines={machines} filtered={false} />
                     ) : (
-                        <ul className="m-0 flex list-none flex-col overflow-hidden rounded-[14px] border border-line bg-panel p-0">
-                            {sessions.map((s, i) => (
-                                <li
-                                    key={s.id}
-                                    className={cn(
-                                        i > 0 && 'border-t border-line-soft',
-                                    )}
-                                >
-                                    <button
-                                        type="button"
-                                        onClick={() => open(s)}
-                                        className="flex min-h-11 w-full cursor-pointer items-center gap-3 px-3.5 py-3 text-left text-ink"
-                                    >
-                                        <StatusDot
-                                            status={s.status}
-                                            className="size-[9px]"
-                                        />
-                                        <span className="flex min-w-0 flex-1 flex-col">
-                                            <span className="truncate font-medium">
-                                                {s.title}
+                        <div className="flex flex-col gap-1">
+                            {projectGroups(sessions, machines, live.projects, machineId, false).map(({ key, name: project, list }) => (
+                                <section key={key} aria-label={project} className="flex flex-col gap-px">
+                                    <div className="flex items-center gap-2 px-2 pt-2 pb-1">
+                                        <span className="section-heading">{project}</span>
+                                        <span className="text-xs text-faint">{list.length}</span>
+                                    </div>
+                                    {list.map((s) => (
+                                        <button key={s.id} type="button" onClick={() => open(s)} className="session-row min-h-[52px]">
+                                            <Monogram agent={s.agent} size={28} />
+                                            <span className="row-text">
+                                                <span className="row-title text-sm">{s.title}</span>
+                                                <span className="row-meta">
+                                                    <StatusDot status={s.status} />
+                                                    <StatusText status={s.status} />
+                                                    {s.on_hold && <span className="text-faint">· On hold</span>}
+                                                    {!online(s) && <span className="text-faint">· {s.machine} offline</span>}
+                                                </span>
                                             </span>
-                                            <span className="text-xs text-dim">
-                                                {s.project} ·{' '}
-                                                {agentName(s.agent)}
-                                            </span>
-                                        </span>
-                                        <StatusPill status={s.status} />
-                                    </button>
-                                </li>
+                                            <span className="row-time">{relativeTime(lastActivity(s)) || timeAgo(s.updated_at)}</span>
+                                        </button>
+                                    ))}
+                                </section>
                             ))}
-                        </ul>
+                        </div>
                     ))}
             </main>
 

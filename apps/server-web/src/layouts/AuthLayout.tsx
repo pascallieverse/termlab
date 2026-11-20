@@ -1,22 +1,25 @@
 import type { ReactNode } from 'react';
 import { LogoMark } from '@/components/el/logo';
+import { cn } from '@/lib/utils';
 
 /** Sign-in and first-run setup: one centred column. */
 export function AuthLayout({ title, description, children }: { title: string; description?: ReactNode; children: ReactNode }) {
     return (
-        <div className="flex min-h-dvh flex-col bg-bg px-6 py-8 text-base leading-[1.55] text-ink">
-            <div className="flex items-center gap-2.5">
-                <LogoMark />
-                <span className="font-display text-[19px] font-bold">
-                    Termlab <span className="text-amber">Server</span>
+        <div className="flex min-h-dvh flex-col bg-bg text-sm leading-normal text-ink">
+            <header className="app-header">
+                <span className="brand">
+                    <LogoMark />
+                    <span>
+                        Termlab <span className="brand-sub">Server</span>
+                    </span>
                 </span>
-            </div>
-            <main className="m-auto flex w-full max-w-[420px] flex-col gap-6 py-14">
-                <div className="flex flex-col gap-2">
-                    <h1 className="m-0 font-display text-4xl tracking-[-0.02em]">{title}</h1>
+            </header>
+            <main className="m-auto flex w-full max-w-[440px] flex-col gap-5 px-4 py-12">
+                <div className="flex flex-col gap-1.5">
+                    <h1 className="m-0 text-2xl font-semibold tracking-[-0.01em]">{title}</h1>
                     {description && <p className="m-0 text-dim">{description}</p>}
                 </div>
-                {children}
+                <div className={cn('flex flex-col gap-4 rounded-[14px] border border-line-strong bg-panel p-[22px]')}>{children}</div>
             </main>
         </div>
     );
@@ -35,11 +38,11 @@ export function Field({
 }) {
     return (
         <div className="flex flex-col gap-1.5">
-            <label htmlFor={id} className="text-sm font-medium">
+            <label htmlFor={id} className="text-xs font-semibold text-dim">
                 {label}
             </label>
             {children}
-            {hint && <span className="text-[13px] text-dim">{hint}</span>}
+            {hint && <span className="text-xs text-faint">{hint}</span>}
         </div>
     );
 }
@@ -50,21 +53,21 @@ export function FormError({ message }: { message: string | null }) {
     }
 
     return (
-        <p role="alert" className="m-0 rounded-[10px] border border-bad-line bg-bad-bg px-3 py-2.5 text-sm text-bad">
+        <p role="alert" className="m-0 rounded-[8px] border border-bad-line bg-bad-bg px-3 py-2.5 text-[13px] text-bad">
             {message}
         </p>
     );
 }
 
 export const inputClass =
-    'min-h-[46px] w-full rounded-[10px] border border-line-strong bg-surface px-3.5 text-ink';
+    'min-h-9 w-full rounded-[8px] border border-line-strong bg-raised px-3 text-ink outline-none focus:border-[#3a4250] max-md:min-h-11';
 
 /** The QR code the server rendered, plus the secret for typing it in by hand. */
 export function TotpQr({ svg, secret, url }: { svg: string; secret: string; url: string }) {
     const safe = svg.trimStart().startsWith('<svg');
 
     return (
-        <div className="flex flex-col items-center gap-3 rounded-xl border border-line bg-panel p-4">
+        <div className="flex flex-col items-center gap-3 rounded-[10px] border border-line bg-bg p-4">
             {safe && (
                 <div
                     role="img"

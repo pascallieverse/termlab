@@ -1,13 +1,109 @@
-import { useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
+import { Monogram } from '@/components/el/agent';
 import { ApprovalActions } from '@/components/el/approval-actions';
 import { Button } from '@/components/el/button';
 import { StatusPill } from '@/components/el/status';
-import { agentName, compactNumber, timeAgo } from '@/lib/format';
-import { cn } from '@/lib/utils';
+import { agentName, atLeast, compactNumber, timeAgo } from '@/lib/format';
+import { useLive } from '@/live/LiveProvider';
 import type { ApprovalChoice, RemoteSession } from '@/types';
 import { LiveTerminal } from './live-terminal';
+import { ProjectNotes } from './project-notes';
 
-/** Focus view: the terminal, the approval bar, a message box and the inspector. */
+// ---- the right column: open or closed, on the session's details or its project's notes ----
+// As in the desktop app; remembered per browser (a convenience, so storage may fail).
+
+type InspectorTab = 'session' | 'notes';
+type InspectorState = { open: boolean; tab: InspectorTab };
+
+const KEY = 'termlab.inspector';
+const WIDE = '(min-width: 1024px)';
+const listeners = new Set<() => void>();
+let state: InspectorState | null = null;
+
+function readState(): InspectorState {
+    if (state) return state;
+    let saved: Partial<InspectorState> = {};
+    try {
+        saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') as Partial<InspectorState>;
+    } catch {
+        // Storage unavailable: defaults.
+    }
+    // Closed until you open it, as in the desktop app; then remembered. On narrow screens it
+    // covers the terminal, so it starts closed there.
+    state = {
+        open: saved.open === true && window.matchMedia(WIDE).matches,
+        tab: saved.tab === 'notes' ? 'notes' : 'session',
+    };
+    return state;
+}
+
+function setState(next: InspectorState) {
+    state = next;
+    try {
+        localStorage.setItem(KEY, JSON.stringify(next));
+    } catch {
+        // Still works for this page.
+    }
+    listeners.forEach((l) => l());
+}
+
+function useInspector(): [InspectorState, (tab: InspectorTab) => void, () => void] {
+    const s = useSyncExternalStore(
+        (cb) => {
+            listeners.add(cb);
+            return () => listeners.delete(cb);
+        },
+        readState,
+        readState,
+    );
+    /** Opens on a tab, or closes when that tab is already showing. */
+    const show = (tab: InspectorTab) => setState({ open: !(s.open && s.tab === tab), tab });
+    const close = () => setState({ ...s, open: false });
+    return [s, show, close];
+}
+
+function useWide(): boolean {
+    return useSyncExternalStore(
+        (cb) => {
+            const mql = window.matchMedia(WIDE);
+            mql.addEventListener('change', cb);
+            return () => mql.removeEventListener('change', cb);
+        },
+        () => window.matchMedia(WIDE).matches,
+        () => true,
+    );
+}
+
+function Icon({ name }: { name: 'note' | 'panel' | 'back' | 'close' }) {
+    const paths = {
+        note: (
+            <>
+                <path d="M5 4h14v11l-5 5H5z" />
+                <path d="M14 20v-5h5M8.5 9h7M8.5 12.5h4" />
+            </>
+        ),
+        panel: (
+            <>
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <path d="M15 4v16" />
+            </>
+        ),
+        back: <path d="M15 18l-6-6 6-6" />,
+        close: <path d="M18 6 6 18M6 6l12 12" />,
+    };
+    return (
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            {paths[name]}
+        </svg>
+    );
+}
+
+/** "/Users/pascal/Code/api" → "~/Code/api". */
+function tildify(path: string): string {
+    return path.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, '~').replace(/^[A-Z]:\\Users\\[^\\]+/i, '~');
+}
+
+/** Focus view, laid out like the desktop app's session pane: header, terminal, approval, inspector. */
 export function SessionFocus({
     session,
     online,
@@ -22,273 +118,258 @@ export function SessionFocus({
     lastSeen?: string | null;
     pending?: string;
     onAnswer: (choice: ApprovalChoice) => void;
-    onAction: (
-        action: 'message' | 'stop' | 'hold',
-        body?: Record<string, unknown>,
-        label?: string,
-    ) => Promise<boolean>;
+    onAction: (action: 'message' | 'stop' | 'hold' | 'unhold', body?: Record<string, unknown>, label?: string) => Promise<boolean>;
     onBack?: () => void;
 }) {
-    const [text, setText] = useState('');
-    const [confirmStop, setConfirmStop] = useState(false);
-    const needsYou = session.status === 'needs_you' && session.approval;
-    /** Done and Error are final: there is no process left to stop. */
-    const ended = session.status === 'done' || session.status === 'error';
-    const ctx = session.context_pct ?? 0;
+    const [inspector, show, close] = useInspector();
+    const live = useLive();
+    const canResize = atLeast(live.machines.find((m) => m.id === session.machine_id)?.version, '0.2.9');
+    const wide = useWide();
+    const approval = session.status === 'needs_you' ? session.approval : null;
+    const agent = agentName(session.agent);
 
-    async function send(e: React.FormEvent) {
-        e.preventDefault();
-        if (!text.trim()) {
-            return;
-        }
-        if (await onAction('message', { text }, 'Message sent')) {
-            setText('');
-        }
-    }
+    // On narrow screens the panel covers the terminal: Escape closes it.
+    useEffect(() => {
+        if (wide || !inspector.open) return;
+        const onKey = (e: KeyboardEvent) => e.key === 'Escape' && close();
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [wide, inspector.open, close]);
+
+    const toggle = (tab: InspectorTab, label: string) => {
+        const on = inspector.open && inspector.tab === tab;
+        return (
+            <button
+                type="button"
+                className={`icon-btn focus-toggle${on ? ' on' : ''}`}
+                aria-label={label}
+                aria-pressed={on}
+                title={`${on ? 'Hide' : 'Show'} ${label.toLowerCase()}`}
+                onClick={() => show(tab)}
+            >
+                <Icon name={tab === 'notes' ? 'note' : 'panel'} />
+            </button>
+        );
+    };
 
     return (
-        <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-            <section
-                aria-label="Terminal"
-                className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 px-5 py-4 max-md:px-4"
-            >
-                <div className="flex flex-wrap items-center justify-between gap-2.5">
-                    <div className="flex min-w-0 items-center gap-3">
-                        {onBack && (
-                            <button
-                                type="button"
-                                onClick={onBack}
-                                aria-label="Back to sessions"
-                                className="grid size-11 cursor-pointer place-items-center rounded-lg border border-line-strong text-ink hover:bg-raised"
-                            >
-                                <svg
-                                    width="18"
-                                    height="18"
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    strokeWidth="2"
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                    aria-hidden="true"
-                                >
-                                    <path d="M15 18l-6-6 6-6" />
-                                </svg>
-                            </button>
-                        )}
-                        <div className="flex min-w-0 flex-col">
-                            <h1 className="m-0 truncate font-display text-xl font-semibold">
-                                {session.title}
-                            </h1>
-                            <span className="text-xs text-dim">
-                                {session.project} · {agentName(session.agent)} ·{' '}
-                                {session.machine}
+        <div className="relative flex min-h-0 flex-1">
+            <section aria-label={session.title} className="flex min-h-0 min-w-0 flex-1 flex-col">
+                <div className="session-head">
+                    {onBack && (
+                        <button type="button" onClick={onBack} aria-label="Back to sessions" className="icon-btn focus-toggle -ml-2">
+                            <Icon name="back" />
+                        </button>
+                    )}
+                    <span className="max-md:hidden">
+                        <Monogram agent={session.agent} size={38} />
+                    </span>
+                    <span className="md:hidden">
+                        <Monogram agent={session.agent} size={30} />
+                    </span>
+                    <div className="session-title">
+                        <h1 title={session.title}>{session.title}</h1>
+                        <div className="session-meta">
+                            <span className="max-md:hidden">{agent}</span>
+                            <span aria-hidden="true" className="max-md:hidden">
+                                ·
                             </span>
+                            <span className="truncate font-mono">{session.model ?? 'default model'}</span>
+                            {session.branch && (
+                                <>
+                                    <span aria-hidden="true">·</span>
+                                    <span className="truncate font-mono">⎇ {session.branch}</span>
+                                </>
+                            )}
                         </div>
                     </div>
-                    <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="max-md:hidden">
                         <StatusPill status={session.status} />
-                        <Button
-                            variant="outline"
-                            className="min-h-10 rounded-[7px] px-3"
-                            disabled={!online}
-                            onClick={() =>
-                                onAction('hold', {}, 'Putting on hold…')
-                            }
-                        >
-                            Put on hold
-                        </Button>
-                        {confirmStop ? (
-                            <>
-                                <Button
-                                    variant="danger"
-                                    className="min-h-10 rounded-[7px] px-3"
-                                    onClick={() => {
-                                        setConfirmStop(false);
-                                        void onAction('stop', {}, 'Stopping…');
-                                    }}
-                                >
-                                    Stop the session
-                                </Button>
-                                <Button
-                                    variant="ghost"
-                                    className="min-h-10 rounded-[7px] px-3"
-                                    onClick={() => setConfirmStop(false)}
-                                >
-                                    Keep running
-                                </Button>
-                            </>
-                        ) : (
-                            <Button
-                                variant="danger"
-                                className="min-h-10 rounded-[7px] px-3"
-                                disabled={!online || ended}
-                                onClick={() => setConfirmStop(true)}
-                            >
-                                Stop
-                            </Button>
-                        )}
-                    </div>
+                    </span>
+                    <div className="flex-1" />
+                    {toggle('notes', 'Project notes')}
+                    {toggle('session', 'Session details')}
                 </div>
 
                 {!online && (
-                    <div
-                        role="status"
-                        className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-[10px] border border-line-strong bg-panel px-3.5 py-3 text-[13px] text-dim"
-                    >
-                        <span className="font-semibold text-ink">
-                            {session.machine} is offline
-                        </span>
+                    <div role="status" className="banner muted">
                         <span>
-                            · last seen {timeAgo(lastSeen)}. These are the last
-                            lines it reported. Approvals and messages work again
-                            once Termlab reconnects.
+                            <strong className="font-semibold text-ink">{session.machine} is offline</strong> · last seen {timeAgo(lastSeen)}. These
+                            are the last lines it reported. Approvals work again once Termlab reconnects.
                         </span>
                     </div>
                 )}
 
-                <LiveTerminal
-                    sessionId={session.id}
-                    preview={session.preview}
-                    interactive={online}
-                />
+                <div className="flex min-h-0 flex-1 flex-col bg-term">
+                    <LiveTerminal sessionId={session.id} preview={session.preview} interactive={online} canResize={canResize} />
+                </div>
 
-                {needsYou && (
-                    <div
-                        role="alert"
-                        className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-amber-line bg-amber-panel px-3.5 py-3"
-                    >
-                        <span className="flex min-w-0 flex-col gap-0.5">
-                            <span className="font-semibold text-amber-soft">
-                                {session.approval!.question}
+                {approval && (
+                    <div role="alert" aria-label={approval.kind === 'question' ? 'Question' : 'Permission request'} className="approval">
+                        <div className="approval-text">
+                            <span className="approval-title">
+                                {agent} {approval.kind === 'question' ? 'has a question for you' : 'is asking for permission'}
                             </span>
-                            {session.approval!.detail && (
-                                <code className="font-mono text-[13px] break-all text-ink-soft">
-                                    {session.approval!.detail}
-                                </code>
-                            )}
-                        </span>
-                        <ApprovalActions
-                            onAnswer={onAnswer}
-                            pending={
-                                online
-                                    ? pending
-                                    : 'Answer when the machine is back online'
-                            }
-                        />
+                            {approval.detail && <code>{approval.detail}</code>}
+                            {approval.question && <span className="approval-question">{approval.question}</span>}
+                        </div>
+                        <ApprovalActions onAnswer={onAnswer} pending={online ? pending : 'Answer when the machine is back online'} />
                     </div>
                 )}
-
-                <form onSubmit={send} className="flex gap-2">
-                    <label htmlFor="msg" className="sr-only">
-                        Message to the session
-                    </label>
-                    <input
-                        id="msg"
-                        type="text"
-                        value={text}
-                        onChange={(e) => setText(e.target.value)}
-                        disabled={!online}
-                        placeholder={
-                            online
-                                ? 'Type to the session… (sent as keystrokes)'
-                                : `${session.machine} is offline`
-                        }
-                        className="min-h-11 min-w-0 flex-1 rounded-[9px] border border-line-strong bg-surface px-3 font-mono text-[13px] text-ink"
-                    />
-                    <Button
-                        type="submit"
-                        variant="light"
-                        className="rounded-[9px]"
-                        disabled={!online || !text.trim()}
-                    >
-                        Send
-                    </Button>
-                </form>
-                {pending && !needsYou && (
-                    <p role="status" className="m-0 text-[13px] text-dim">
+                {pending && !approval && (
+                    <p role="status" className="m-0 px-5 py-2 text-xs text-dim">
                         {pending}
                     </p>
                 )}
             </section>
 
-            <aside
-                aria-label="Inspector"
-                className="flex flex-col gap-[18px] border-t border-line-soft bg-surface px-[18px] py-4 lg:w-[280px] lg:flex-none lg:overflow-y-auto lg:border-t-0 lg:border-l"
-            >
-                <h2 className="m-0 text-[13px] font-semibold tracking-[0.04em] text-dim">
-                    INSPECTOR
-                </h2>
-                <dl className="m-0 grid grid-cols-2 gap-x-2.5 gap-y-3 text-[13px]">
-                    <div>
-                        <dt className="text-dim">Model</dt>
-                        <dd className="m-0">{session.model ?? '—'}</dd>
-                    </div>
-                    <div>
-                        <dt className="text-dim">Branch</dt>
-                        <dd className="m-0 truncate font-mono text-xs">
-                            {session.branch ?? '—'}
-                        </dd>
-                    </div>
-                    <div>
-                        <dt className="text-dim">Agent</dt>
-                        <dd className="m-0">{agentName(session.agent)}</dd>
-                    </div>
-                    <div>
-                        <dt className="text-dim">Tokens</dt>
-                        <dd className="m-0">{compactNumber(session.tokens)}</dd>
-                    </div>
-                </dl>
-                {session.context_pct !== null && (
-                    <div className="flex flex-col gap-1.5">
-                        <span className="flex justify-between text-[13px]">
-                            <span className="text-dim">Context window</span>
-                            <span>{ctx}%</span>
-                        </span>
-                        <div
-                            role="meter"
-                            aria-label="Context window used"
-                            aria-valuenow={ctx}
-                            aria-valuemin={0}
-                            aria-valuemax={100}
-                            className="h-1.5 overflow-hidden rounded-full bg-line-soft"
-                        >
-                            <div
-                                className={cn(
-                                    'h-full',
-                                    ctx > 80 ? 'bg-bad-dot' : 'bg-ink',
-                                )}
-                                style={{ width: `${ctx}%` }}
-                            />
-                        </div>
-                    </div>
-                )}
-                <div className="flex flex-col gap-2">
-                    <span className="text-[13px] text-dim">Changed files</span>
-                    {session.changed_files.length === 0 && (
-                        <span className="text-[13px] text-faint">None yet</span>
-                    )}
-                    {session.changed_files.map((file) => (
-                        <span
-                            key={file.path}
-                            className="flex justify-between gap-2 font-mono text-xs"
-                        >
-                            <span className="truncate">{file.path}</span>
-                            <span className="flex-none">
-                                <span className="text-ok">
-                                    +{file.added ?? 0}
-                                </span>{' '}
-                                <span className="text-bad">
-                                    −{file.removed ?? 0}
-                                </span>
-                            </span>
-                        </span>
-                    ))}
-                </div>
-                <p className="mt-auto mb-0 text-xs text-dim">
-                    Remote view of the session running on {session.machine}.
-                </p>
-            </aside>
+            {inspector.open && (
+                <>
+                    {!wide && <button type="button" aria-label="Close the panel" className="inspector-scrim" onClick={close} />}
+                    <aside
+                        aria-label={inspector.tab === 'notes' ? 'Project notes' : 'Session details'}
+                        className={`inspector${wide ? '' : ' inspector-sheet'}`}
+                    >
+                        {!wide && (
+                            <div className="inspector-sheet-head">
+                                <div role="tablist" aria-label="Panel" className="segmented">
+                                    {(['session', 'notes'] as const).map((t) => (
+                                        <button key={t} type="button" role="tab" aria-selected={inspector.tab === t} className={inspector.tab === t ? 'on' : ''} onClick={() => setState({ open: true, tab: t })}>
+                                            {t === 'session' ? 'Session' : 'Notes'}
+                                        </button>
+                                    ))}
+                                </div>
+                                <button type="button" className="icon-btn focus-toggle" aria-label="Close" onClick={close}>
+                                    <Icon name="close" />
+                                </button>
+                            </div>
+                        )}
+                        {inspector.tab === 'notes' ? (
+                            <ProjectNotes key={`${session.machine_id}:${session.directory ?? session.project}`} session={session} online={online} />
+                        ) : (
+                            <SessionDetails session={session} online={online} onAction={onAction} />
+                        )}
+                    </aside>
+                </>
+            )}
         </div>
+    );
+}
+
+function SessionDetails({
+    session,
+    online,
+    onAction,
+}: {
+    session: RemoteSession;
+    online: boolean;
+    onAction: (action: 'message' | 'stop' | 'hold' | 'unhold', body?: Record<string, unknown>, label?: string) => Promise<boolean>;
+}) {
+    const [confirmStop, setConfirmStop] = useState(false);
+    /** Done and Error are final: there is no process left to stop. */
+    const ended = session.status === 'done' || session.status === 'error';
+    const ctx = session.context_pct;
+    const ctxColor = ctx === null ? 'var(--color-info-dot)' : ctx > 80 ? 'var(--color-bad-dot)' : ctx > 60 ? 'var(--color-amber)' : 'var(--color-info-dot)';
+    const files = session.changed_files;
+
+    return (
+        <>
+            <section>
+                <h2 className="section-heading">Session</h2>
+                <dl className="facts">
+                    <dt>Agent</dt>
+                    <dd>{agentName(session.agent)}</dd>
+                    <dt>Status</dt>
+                    <dd className="flex flex-wrap items-center gap-2">
+                        <StatusPill status={session.status} />
+                        {session.on_hold && <span className="text-xs text-dim">On hold</span>}
+                    </dd>
+                    <dt>Model</dt>
+                    <dd className="mono">{session.model ?? 'default'}</dd>
+                    <dt>Directory</dt>
+                    <dd className="mono">{session.directory ? tildify(session.directory) : session.project}</dd>
+                    <dt>Branch</dt>
+                    <dd className="mono">{session.branch ?? '—'}</dd>
+                    <dt>Machine</dt>
+                    <dd>
+                        <span className="inline-flex items-center gap-1.5">
+                            <span aria-hidden="true" className="dot" style={{ background: online ? '#3FB950' : '#8B929C' }} />
+                            {session.machine}
+                            <span className="sr-only">{online ? '(online)' : '(offline)'}</span>
+                        </span>
+                    </dd>
+                </dl>
+            </section>
+
+            <section>
+                <h2 className="section-heading">Context &amp; spend</h2>
+                <div className="row-between">
+                    <span className="text-dim">Context window</span>
+                    <span>{ctx === null ? '—' : `${ctx}%`}</span>
+                </div>
+                <div className="meter" role="img" aria-label={ctx === null ? 'Context window use unknown' : `Context window ${ctx} percent used`}>
+                    <div style={{ width: `${ctx ?? 0}%`, background: ctxColor }} />
+                </div>
+                <div className="stat-grid">
+                    <div className="stat">
+                        <div className="stat-label">Tokens</div>
+                        <div className="stat-value">{compactNumber(session.tokens)}</div>
+                    </div>
+                    <div className="stat">
+                        <div className="stat-label">Changed files</div>
+                        <div className="stat-value">{files.length}</div>
+                    </div>
+                </div>
+            </section>
+
+            <section>
+                <h2 className="section-heading">Changed files</h2>
+                {files.length === 0 && <p className="m-0 text-xs text-dim">No changes yet.</p>}
+                {files.slice(0, 30).map((file) => (
+                    <div key={file.path} className="file-row">
+                        <span className="file-path" title={file.path}>
+                            {file.path}
+                        </span>
+                        <span className="text-ok">+{file.added ?? 0}</span>
+                        <span className="text-[#ff7b72]">−{file.removed ?? 0}</span>
+                    </div>
+                ))}
+                {files.length > 30 && <p className="m-0 text-xs text-faint">{files.length - 30} more…</p>}
+            </section>
+
+            <section>
+                <h2 className="section-heading">Actions</h2>
+                {session.on_hold ? (
+                    <Button variant="default" disabled={!online} onClick={() => onAction('unhold', {}, 'Taking off hold…')}>
+                        Take off hold
+                    </Button>
+                ) : (
+                    <Button variant="default" disabled={!online || ended} onClick={() => onAction('hold', {}, 'Putting on hold…')}>
+                        Put on hold
+                    </Button>
+                )}
+                {confirmStop ? (
+                    <div className="grid grid-cols-2 gap-2">
+                        <Button
+                            variant="danger"
+                            onClick={() => {
+                                setConfirmStop(false);
+                                void onAction('stop', {}, 'Stopping…');
+                            }}
+                        >
+                            Stop it
+                        </Button>
+                        <Button variant="ghost" onClick={() => setConfirmStop(false)}>
+                            Keep running
+                        </Button>
+                    </div>
+                ) : (
+                    <Button variant="danger" disabled={!online || ended} onClick={() => setConfirmStop(true)}>
+                        Stop session
+                    </Button>
+                )}
+                {!online && <p className="m-0 text-xs text-faint">{session.machine} is offline.</p>}
+            </section>
+        </>
     );
 }

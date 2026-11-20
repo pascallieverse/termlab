@@ -26,6 +26,11 @@ type SessionView = {
   machine_id: number;
   machine: string;          // machine name
   project: string;
+  directory?: string | null; // the project folder's path (Termlab 0.2.9+); keys its notes
+  project_order?: number | null; // the project's place in Termlab's sidebar (0.2.9+)
+  created_at?: number | null;    // when the session started, ms (0.2.9+); newest first
+  folder_id?: number | null;     // the project folder's id on the machine (0.2.9+)
+  on_hold?: boolean;             // held in Termlab; listed under On hold only (0.2.9+)
   title: string;
   agent: string;            // claude | codex | vibe | antigravity | shell
   model: string | null;
@@ -49,6 +54,30 @@ type Machine = {
   last_seen_at: string | null;
   sessions: number;
   running: number;          // running + needs_you
+  notes_sync: boolean;      // its Termlab syncs project notes
+};
+
+type ProjectNotes = {
+  machine_id: number;
+  path: string;             // the project folder, as in SessionView.directory
+  text: string;
+  updated_at: number | null; // ms since the epoch
+};
+
+type MachineProjects = {
+  machine_id: number;
+  projects: { id: number; name: string; path: string; order: number }[]; // sidebar order
+  agents: { agent: string; name: string; model_flag: boolean; models: string[] }[]; // installed
+};
+
+// As Termlab reports it (camelCase, like the desktop app's own API).
+type PlanUsage = {
+  agent: string;
+  windows: { id: string; label?: string | null; usedPercentage: number; resetsAt: number | null }[];
+  updatedAt: number;
+  connected?: boolean | null;
+  plan?: string | null;
+  note?: string | null;
 };
 
 type WebhookEndpoint = {
@@ -82,11 +111,14 @@ unless the public URL is plain http). Every request other than GET must send the
 
 | Request | Answer |
 |---|---|
-| `GET /api/overview` | `{ machines: Machine[], sessions: SessionView[] }` |
+| `GET /api/overview` | `{ machines: Machine[], sessions: SessionView[], notes: ProjectNotes[], usage: { machine_id, usage: PlanUsage[] }[], projects: MachineProjects[] }` |
 | `POST /api/sessions/{id}/answer { choice }` | 202 `{ command_id }`; 409 `{message}` when not waiting or machine offline |
 | `POST /api/sessions/{id}/message { text }` | 202 / 409 |
 | `POST /api/sessions/{id}/stop` | 202 / 409 |
 | `POST /api/sessions/{id}/hold` | 202 / 409 |
+| `POST /api/sessions/{id}/unhold` | 202 / 409 |
+| `POST /api/machines/{id}/sessions { request_id, folder_id, agent, permission, model?, message? }` | 202 / 422 (unknown project or agent) / 409 (offline). Audited. The result comes as `session.start_result`. `permission`: `ask_first`, `auto_edit` or `full_auto`. |
+| `POST /api/machines/{id}/projects/move { folder_id, before }` | 202 / 404 / 409. Puts the project before `before` (null: last), in Termlab's sidebar too. |
 
 Each of these is written to the audit log before the command goes to the machine.
 
@@ -98,6 +130,7 @@ Each of these is written to the audit log before the command goes to the machine
 | `POST /api/pairing-codes` | `{ code: "K7QX-2MPD", expires_at }` (10 minutes, single use; a new code replaces the previous one) |
 | `PATCH /api/machines/{id} { name }` | `Machine` |
 | `DELETE /api/machines/{id}` | 204. Revokes its token and disconnects it. |
+| `PUT /api/machines/{id}/notes { path, text }` | 202 / 404 (unknown project) / 409 (offline). The machine saves them and sends its notes back (`notes.updated`). Blank text removes them; up to 100,000 characters. |
 
 ### Webhooks
 
@@ -152,6 +185,10 @@ Server → browser:
 - `{ "type": "session.updated", "session": SessionView }`
 - `{ "type": "session.removed", "id": "…" }`
 - `{ "type": "machine.updated", "machine": Machine }`
+- `{ "type": "notes.updated", "machine_id": 1, "notes": ProjectNotes[] }`: all of that machine's notes.
+- `{ "type": "usage.updated", "machine_id": 1, "usage": PlanUsage[] }`
+- `{ "type": "projects.updated", "machine_id": 1, "projects": […], "agents": […] }`
+- `{ "type": "session.start_result", "machine_id": 1, "request_id": "…", "id": "…"|null, "error": "…"|null }`
 - `{ "type": "output", "id": "…", "data": "<base64>", "snapshot": true|false, "cols": 120|null, "rows": 32|null }`.
   A snapshot resets the terminal: resize to `cols`×`rows` (when given), clear, then write.
 - `{ "type": "watch", "id": "…", "live": true|false }`. Whether the machine is streaming
@@ -160,6 +197,8 @@ Server → browser:
 Browser → server:
 - `{ "type": "watch", "id": "…", "on": true|false }`: open or close a terminal view.
 - `{ "type": "input", "id": "…", "data": "<base64>" }`: keystrokes for a watched terminal.
+- `{ "type": "resize", "id": "…", "cols": 100, "rows": 30 }`: give a watched session this view's
+  size (20–500 × 5–300); `{ "type": "resize", "id": "…", "release": true }` hands it back.
 
 ## Machine API (termlabd)
 
@@ -180,12 +219,26 @@ Machine → server:
   the server and may be omitted.
 - `{ "type": "session", "session": SessionView }`: upsert one session
 - `{ "type": "removed", "id": "…" }`
+- `{ "type": "notes", "notes": { path, text, updated_at }[] }`: every project's notes, after
+  connecting and whenever they change; replaces what the server had. (Termlab 0.2.9+.)
+- `{ "type": "usage", "usage": PlanUsage[] }`: plan usage, after connecting and when it changes.
+- `{ "type": "projects", "projects": […], "agents": […] }`: the project folders in sidebar order
+  and the installed agents, after connecting and when folders change.
+- `{ "type": "started", "request_id": "…", "id": "…" }` / `{ "type": "start_failed", "request_id": "…", "error": "…" }`
 - `{ "type": "output", "id": "…", "data": "<base64>", "snapshot": bool, "cols": n|null, "rows": n|null }`
 
 Server → machine:
-- `{ "type": "command", "id": "<uuid>", "command": "answer" | "message" | "stop" | "hold", "session_id": "…", "data": { "choice"?: ApprovalChoice, "text"?: string } }`
+- `{ "type": "command", "id": "<uuid>", "command": "answer" | "message" | "stop" | "hold" | "unhold", "session_id": "…", "data": { "choice"?: ApprovalChoice, "text"?: string } }`
 - `{ "type": "watch", "id": "…", "on": bool }`: start streaming (snapshot first) or stop.
 - `{ "type": "input", "id": "…", "data": "<base64>" }`: keystrokes from a viewer.
+- `{ "type": "resize", "id": "…", "cols": n, "rows": n }` / `{ …, "release": true }`: a viewer's
+  size for the pty. Termlab gives the app's size back on release, when the last viewer stops
+  watching, or when the connection drops, unless the app resized it meanwhile. (0.2.9+)
+- `{ "type": "session.start", "request_id": "…", "folder_id": 1, "agent": "claude", "permission": "ask_first", "model": null, "message": null }`:
+  a new session (never resume or fork), in a folder Termlab knows.
+- `{ "type": "project.move", "folder_id": 2, "before": 1 }`: reorder (`before` null: last).
+- `{ "type": "notes.save", "path": "…", "text": "…" }`: notes edited in the browser, for a
+  project folder Termlab knows; it answers with `notes`.
 - `{ "type": "bye", "reason": "…" }`: the token was revoked; forget it.
 
 A machine is online while its websocket is open (pings every 25 s). If it stays

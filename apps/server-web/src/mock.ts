@@ -8,7 +8,7 @@ const now = () => new Date().toISOString();
 const ago = (s: number) => new Date(Date.now() - s * 1000).toISOString();
 
 const machines: Machine[] = [
-    { id: 1, name: 'studio-mac', os: 'macOS 15 · Apple Silicon', version: '0.2.7', online: true, last_seen_at: now(), sessions: 4, running: 3 },
+    { id: 1, name: 'studio-mac', os: 'macOS 15 · Apple Silicon', version: '0.2.9', online: true, last_seen_at: now(), sessions: 4, running: 3, notes_sync: true },
     { id: 2, name: 'build-box', os: 'Ubuntu 24.04 · x86-64', version: '0.2.7', online: false, last_seen_at: ago(3600), sessions: 1, running: 0 },
 ];
 
@@ -67,7 +67,18 @@ export function installMock(mode: string): void {
             signedIn = false;
             return json(null, 204);
         }
-        if (path === '/api/overview') return json({ machines, sessions });
+        if (path === '/api/overview') return json({
+                machines,
+                sessions: sessions.map((s, i) => ({ ...s, directory: `/Users/me/Code/${s.project}`, project_order: i, created_at: Date.now() - i * 60_000, on_hold: s.id === 'a3' })),
+                notes: [{ machine_id: 1, path: '/Users/me/Code/api-server', text: '- Deploy with ./deploy.sh\n- Staging DB resets nightly', updated_at: Date.now() }],
+                projects: [
+                    { machine_id: 1, projects: [...new Set(sessions.filter((x) => x.machine_id === 1).map((x) => x.project)), 'brightness', 'democms'].map((name, i) => ({ id: i + 1, name, path: `/Users/me/Code/${name}`, order: i })), agents: [{ agent: 'claude', name: 'Claude Code', model_flag: true, models: ['opus', 'sonnet'] }, { agent: 'codex', name: 'Codex', model_flag: true, models: [] }, { agent: 'shell', name: 'Terminal', model_flag: false, models: [] }] },
+                ],
+                usage: [{ machine_id: 1, usage: [
+                    { agent: 'claude', windows: [{ id: 'five_hour', usedPercentage: 68, resetsAt: Date.now() + 3_600_000 }, { id: 'seven_day', usedPercentage: 11, resetsAt: Date.now() + 86_400_000 * 3 }], updatedAt: Date.now() - 60_000, connected: true, plan: 'max' },
+                    { agent: 'codex', windows: [{ id: 'seven_day', usedPercentage: 25, resetsAt: Date.now() + 86_400_000 * 5 }], updatedAt: Date.now() - 120_000, connected: true, plan: 'pro' },
+                ] }],
+            });
         if (path.startsWith('/api/sessions/')) {
             const id = path.split('/')[3];
             sessions = sessions.map((s) => (s.id === id ? { ...s, status: 'running', approval: null } : s));
@@ -140,10 +151,10 @@ class MockSocket {
         const msg = JSON.parse(raw) as { type: string; id: string; on?: boolean; data?: string };
         if (msg.type === 'watch' && msg.on) {
             const s = sessions.find((x) => x.id === msg.id);
-            const text = (s?.preview ?? []).join('\r\n') + '\r\n\x1b[32m❯\x1b[0m ';
+            const text = (s?.preview ?? []).join('\r\n') + '\r\n' + '─'.repeat(160) + '\r\n\x1b[32m❯\x1b[0m ';
             setTimeout(() => {
                 this.emit({ type: 'watch', id: msg.id, live: true });
-                this.emit({ type: 'output', id: msg.id, data: btoa(unescape(encodeURIComponent(text))), snapshot: true, cols: 90, rows: 24 });
+                this.emit({ type: 'output', id: msg.id, data: btoa(unescape(encodeURIComponent(text))), snapshot: true, cols: 160, rows: 24 });
             }, 300);
         }
         if (msg.type === 'input' && msg.data) {
