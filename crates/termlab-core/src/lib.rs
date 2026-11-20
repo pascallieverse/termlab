@@ -9,6 +9,7 @@ pub mod git;
 pub mod hooks;
 pub mod ipc;
 pub mod model;
+pub mod notes;
 pub mod pty;
 pub mod remote;
 pub mod scrollback;

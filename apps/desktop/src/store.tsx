@@ -85,6 +85,8 @@ interface Store {
   confirmRequest: ConfirmRequest | null;
   /** The session inspector (right column); closed by default, remembered per viewer. */
   inspectorOpen: boolean;
+  /** What the right column shows: the session's details or its project's notes. */
+  inspectorTab: InspectorTab;
   toasts: Toast[];
 
   select(id: string | null, opts?: { view?: View; tab?: Tab }): void;
@@ -108,6 +110,8 @@ interface Store {
   /** Asks before a destructive action. */
   confirm(req: ConfirmRequest | null): void;
   toggleInspector(): void;
+  /** Opens the right column on a tab; closes it when it already shows that tab. */
+  showInspector(tab: InspectorTab): void;
   toast(text: string, kind?: Toast["kind"]): void;
   dismissToast(id: number): void;
   /** Runs an action and shows its error as a toast. */
@@ -122,6 +126,18 @@ interface Store {
 }
 
 const INSPECTOR_KEY = "termlab.inspector";
+const INSPECTOR_TAB_KEY = "termlab.inspector.tab";
+
+export type InspectorTab = "session" | "notes";
+
+/** The inspector's state is a per-viewer convenience, kept in localStorage. */
+function remember(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Storage unavailable: it still works for this window.
+  }
+}
 
 const Ctx = createContext<Store | null>(null);
 
@@ -162,6 +178,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       return localStorage.getItem(INSPECTOR_KEY) === "open";
     } catch {
       return false;
+    }
+  });
+  const [inspectorTab, setInspectorTabState] = useState<InspectorTab>(() => {
+    try {
+      return localStorage.getItem(INSPECTOR_TAB_KEY) === "notes" ? "notes" : "session";
+    } catch {
+      return "session";
     }
   });
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -325,6 +348,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     settingsOpen,
     confirmRequest,
     inspectorOpen,
+    inspectorTab,
     toasts,
     select(id, opts) {
       const session = sessions.find((s) => s.id === id);
@@ -363,10 +387,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     toggleInspector() {
       const next = !inspectorOpen;
       setInspectorOpen(next);
-      try {
-        localStorage.setItem(INSPECTOR_KEY, next ? "open" : "closed");
-      } catch {
-        // Storage unavailable: the toggle still works for this window.
+      remember(INSPECTOR_KEY, next ? "open" : "closed");
+    },
+    showInspector(tab) {
+      const next = !(inspectorOpen && inspectorTab === tab);
+      setInspectorOpen(next);
+      remember(INSPECTOR_KEY, next ? "open" : "closed");
+      if (next) {
+        setInspectorTabState(tab);
+        remember(INSPECTOR_TAB_KEY, tab);
       }
     },
     toast,

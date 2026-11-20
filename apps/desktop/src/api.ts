@@ -17,6 +17,13 @@ export interface Folder {
   sortOrder: number;
 }
 
+/** A project's notes, shared by all of its sessions (kept by the app, see project_notes.rs). */
+export interface ProjectNotes {
+  text: string;
+  /** When they were last saved; null when there are none. */
+  updatedAt: number | null;
+}
+
 export interface ApprovalOption {
   number: number;
   label: string;
@@ -260,6 +267,11 @@ export const api = {
   listFolders: () => call<Folder[]>("listFolders"),
   addFolder: (path: string) => call<Folder>("addFolder", { path }),
   removeFolder: (id: number) => call<null>("removeFolder", { id }),
+  /** A project's notes, by its folder's path. */
+  readProjectNotes: (project: string) => invoke<ProjectNotes>("read_project_notes", { project }),
+  /** Replaces a project's notes; blank text removes them. */
+  saveProjectNotes: (project: string, text: string) =>
+    invoke<ProjectNotes>("save_project_notes", { project, text }),
   agents: () => call<AgentInfo[]>("agents"),
   /** Each agent's subscription plan limits, as last reported (none: an empty list). */
   planUsage: () => call<unknown>("planUsage").then(asUsageList),

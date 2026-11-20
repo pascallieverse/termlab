@@ -14,6 +14,10 @@ const folders: Folder[] = [
   { id: 3, name: "infra", path: "/Users/demo/work/platform/infra", addedAt: now, sortOrder: 2 },
 ];
 
+const notes = new Map<string, { text: string; updatedAt: number | null }>([
+  ["/Users/demo/code/billing-api", { text: "Staging: billing-staging.internal (VPN)\n\n- Retries move to the queue worker; keep the cron until 0042 is deployed\n- Invoice PDF templates are shared with web-dashboard", updatedAt: now - 3 * 3_600_000 }],
+]);
+
 function session(p: Partial<Session> & Pick<Session, "id" | "folderId" | "agent" | "title" | "status">): Session {
   return {
     model: null,
@@ -165,6 +169,13 @@ export function install() {
       if (cmd === "system_volume") return 24;
       if (cmd.startsWith("youtube_music_") || cmd === "open_external" || cmd === "set_system_volume") return null;
       if (cmd.startsWith("plugin:notification")) return true;
+      if (cmd === "read_project_notes") return notes.get(a.project as string) ?? { text: "", updatedAt: null };
+      if (cmd === "save_project_notes") {
+        const text = a.text as string;
+        const saved = text.trim() ? { text, updatedAt: Date.now() } : { text: "", updatedAt: null };
+        notes.set(a.project as string, saved);
+        return saved;
+      }
       if (cmd !== "daemon_call") return null;
       const req = a.request as { method: string; params?: Record<string, unknown> };
       const id = req.params?.id as string | undefined;

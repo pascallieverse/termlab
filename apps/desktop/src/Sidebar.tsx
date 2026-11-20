@@ -87,6 +87,9 @@ export function Sidebar() {
       if (e.key !== "PageUp" && e.key !== "PageDown") return;
       if (e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
       if (document.querySelector('[role="dialog"], [role="menu"]')) return;
+      // In a text box (the project notes) they move the caret; xterm's own input box excepted.
+      const t = e.target;
+      if (t instanceof HTMLTextAreaElement && !t.classList.contains("xterm-helper-textarea")) return;
       const list = orderedRef.current;
       if (list.length === 0) return;
       e.preventDefault();

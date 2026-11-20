@@ -4,7 +4,7 @@ import { AGENTS, sessionColor, tildify } from "./agents";
 import { DiffView } from "./DiffView";
 import { TerminalView } from "./TerminalView";
 import { TimelineView } from "./TimelineView";
-import { useStore, type Tab } from "./store";
+import { useStore, type InspectorTab, type Tab } from "./store";
 import { Icon, Monogram, StatusPill } from "./ui";
 import { useDetails } from "./useDetails";
 import { shortcutHint } from "./shortcuts";
@@ -40,15 +40,8 @@ export function SessionPane({ session: s }: { session: Session }) {
         <div className="spacer" />
         {s.live && s.updateReady && !!s.agentSessionId && canResume && <UpdateButton session={s} />}
         <Tabs current={store.tab} onChange={store.setTab} />
-        <button
-          className={`icon-btn${store.inspectorOpen ? " on" : ""}`}
-          aria-label="Session details"
-          aria-pressed={store.inspectorOpen}
-          title={`${store.inspectorOpen ? "Hide" : "Show"} session details${shortcutHint("inspector")}`}
-          onClick={store.toggleInspector}
-        >
-          <Icon name="panel" size={16} />
-        </button>
+        <InspectorButton tab="notes" label="project notes" icon="note" />
+        <InspectorButton tab="session" label="session details" icon="panel" />
       </div>
 
       {s.onHold && (
@@ -83,6 +76,23 @@ export function SessionPane({ session: s }: { session: Session }) {
         <div className="composer-hint faint mono">{tildify(folder.path, store.home)}</div>
       )}
     </section>
+  );
+}
+
+/** Opens the right column on one of its tabs, or closes it when that tab is showing. */
+function InspectorButton({ tab, label, icon }: { tab: InspectorTab; label: string; icon: "note" | "panel" }) {
+  const store = useStore();
+  const on = store.inspectorOpen && store.inspectorTab === tab;
+  return (
+    <button
+      className={`icon-btn${on ? " on" : ""}`}
+      aria-label={label[0].toUpperCase() + label.slice(1)}
+      aria-pressed={on}
+      title={`${on ? "Hide" : "Show"} ${label}${tab === "session" ? shortcutHint("inspector") : ""}`}
+      onClick={() => store.showInspector(tab)}
+    >
+      <Icon name={icon} size={16} />
+    </button>
   );
 }
 

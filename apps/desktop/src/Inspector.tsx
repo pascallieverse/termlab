@@ -1,9 +1,22 @@
 import { api, type Session } from "./api";
 import { AGENTS, formatCost, formatTokens, permissionLabel, tildify } from "./agents";
-import { useStore } from "./store";
+import { ProjectNotes } from "./ProjectNotes";
+import { useStore, type InspectorTab } from "./store";
 import { useDetails } from "./useDetails";
 
+/** The right column: the selected session's details, or its project's notes. */
 export function Inspector({ session: s }: { session: Session }) {
+  const store = useStore();
+  const folder = store.folderOf(s);
+  const tab: InspectorTab = store.inspectorTab === "notes" && folder ? "notes" : "session";
+  return (
+    <aside className="inspector" aria-label={tab === "notes" ? "Project notes" : "Session details"}>
+      {tab === "notes" && folder ? <ProjectNotes key={folder.path} folder={folder} /> : <SessionDetails session={s} />}
+    </aside>
+  );
+}
+
+function SessionDetails({ session: s }: { session: Session }) {
   const store = useStore();
   const details = useDetails(s.id, s.status);
   const folder = store.folderOf(s);
@@ -18,7 +31,7 @@ export function Inspector({ session: s }: { session: Session }) {
       : "Start a new session that continues from this conversation";
 
   return (
-    <aside className="inspector" aria-label="Session details">
+    <>
       <section>
         <h2 className="section-heading">Session</h2>
         <dl className="facts">
@@ -153,7 +166,7 @@ export function Inspector({ session: s }: { session: Session }) {
           )
         )}
       </section>
-    </aside>
+    </>
   );
 }
 

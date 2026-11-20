@@ -4,6 +4,7 @@
 mod commands;
 mod daemon;
 mod project_env;
+mod project_notes;
 mod updates;
 mod ytmusic;
 
@@ -44,6 +45,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             project_env::read_project_env,
             project_env::save_project_env,
+            project_notes::read_project_notes,
+            project_notes::save_project_notes,
             commands::daemon_call,
             commands::attach_session,
             commands::detach_session,

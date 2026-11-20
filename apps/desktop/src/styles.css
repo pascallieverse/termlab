@@ -565,6 +565,8 @@ h1, h2, h3 { margin: 0; }
 .action-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .action-grid .btn { min-height: 40px; padding: 0 8px; }
 .inspector .actions > .btn { min-height: 40px; }
+.notes { flex: 1; min-height: 0; }
+.notes-text { flex: 1; min-height: 240px; resize: none; font-size: 13px; }
 
 /* ---- empty ---- */
 

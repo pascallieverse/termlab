@@ -87,6 +87,7 @@ type IconName =
   | "settings"
   | "chevron"
   | "panel"
+  | "note"
   | "music"
   | "volume"
   | "volumeOff"
@@ -191,6 +192,12 @@ const ICONS: Record<IconName, ReactNode> = {
       <rect x="4" y="8" width="16" height="11" rx="3" />
       <path d="M12 4.5V8M9 13v1.5M15 13v1.5M2 13v2M22 13v2" />
       <circle cx="12" cy="4" r="1" />
+    </>
+  ),
+  note: (
+    <>
+      <path d="M5 4h14v11l-5 5H5z" />
+      <path d="M14 20v-5h5M8.5 9h7M8.5 12.5h4" />
     </>
   ),
   panel: (
