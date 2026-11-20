@@ -25,6 +25,15 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tauri-plugin-updater = "2"
 
+# Stations load their player page with an https base URL (see station.rs), which takes
+# each platform's own web view API.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSURL"] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-app-kit", "WKWebView", "WKNavigation"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
+
 [lints]
 workspace = true
 

@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; frame-src https://www.youtube-nocookie.com; img-src 'self' data: https://nekos.best https://*.googleusercontent.com https://*.ytimg.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost https://nekos.best"
+      "csp": "default-src 'self'; img-src 'self' data: https://nekos.best https://*.googleusercontent.com https://*.ytimg.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost https://nekos.best"
     }
   },
   "bundle": {

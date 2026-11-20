@@ -9,7 +9,9 @@ license = "FSL-1.1-ALv2"
 rust-version = "1.93"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# "deny", not "forbid": the one exception is the macOS loader in the desktop app's
+# station.rs, which calls WebKit directly and allows it right there.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

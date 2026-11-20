@@ -167,6 +167,8 @@ export function install() {
       }
       if (cmd === "detach_session" || cmd === "open_in_terminal" || cmd === "youtube_live_video") return null;
       if (cmd === "system_volume") return 24;
+      if (cmd === "station_events") return [];
+      if (cmd.startsWith("station_")) return null;
       if (cmd.startsWith("youtube_music_") || cmd === "open_external" || cmd === "set_system_volume") return null;
       if (cmd.startsWith("plugin:notification")) return true;
       if (cmd === "read_project_notes") return notes.get(a.project as string) ?? { text: "", updatedAt: null };

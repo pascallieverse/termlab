@@ -5714,6 +5714,8 @@ name = "termlab-desktop"
 version = "0.2.9"
 dependencies = [
  "anyhow",
+ "objc2-foundation",
+ "objc2-web-kit",
  "serde",
  "serde_json",
  "tauri",
@@ -5726,6 +5728,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "webkit2gtk",
 ]
 
 [[package]]

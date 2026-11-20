@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { api, type YouTubeMusicState } from "./api";
 import { TruncatedText } from "./TruncatedText";
@@ -8,9 +8,10 @@ import { Icon } from "./ui";
 //  - YouTube Music itself, docked: the app places a separate web view (music.youtube.com,
 //    where you sign in) over a slot in this card. It can't be an iframe: YouTube Music
 //    refuses to be framed. The page has no access to Termlab.
-//  - Stations, through YouTube's embeddable player (privacy-enhanced
-//    domain), driven with the player's postMessage protocol so no YouTube script runs in
-//    Termlab's window.
+//  - Stations, through YouTube's embeddable player (privacy-enhanced domain), driven with
+//    the player's postMessage protocol. It's in a web view of its own too, placed over the
+//    card's player slot: YouTube refuses embeds from Termlab's page (error 153; see
+//    station.rs). No YouTube script runs in Termlab's window.
 
 const YT_ORIGIN = "https://www.youtube-nocookie.com";
 const ENABLED_KEY = "termlab.music";
@@ -41,6 +42,66 @@ function isCovered(slot: DOMRect): boolean {
   }
   return false;
 }
+
+/**
+ * Keeps a native web view over `slot`, or out of view when it shouldn't show there: not
+ * wanted, covered by something of Termlab's, too small or partly outside the window.
+ * `apply` does the native call (null: out of view). Calls are serialized, so a stale one
+ * can't cover a menu or a closed card. Returns the chain, for a last call on unmount.
+ */
+function useNativePlacement(
+  show: boolean,
+  slot: RefObject<HTMLElement | null>,
+  minSize: number,
+  apply: (rect: DOMRect | null) => Promise<unknown>,
+  onCovered: (covered: boolean) => void,
+  onError: (e: unknown) => void,
+  deps: unknown[],
+) {
+  const placement = useRef<Promise<unknown>>(Promise.resolve());
+  const callbacks = useRef({ apply, onCovered, onError });
+  callbacks.current = { apply, onCovered, onError };
+  useEffect(() => {
+    let cancelled = false;
+    let revision = 0;
+    let last = "";
+    const place = () => {
+      const r = slot.current?.getBoundingClientRect();
+      const hide = !show || !r || isCovered(r) || r.width < minSize || r.height < minSize
+        || r.top < 0 || r.left < 0 || r.bottom > window.innerHeight || r.right > window.innerWidth;
+      const key = hide ? "hidden" : [r.left, r.top, r.width, r.height].map(Math.round).join(",");
+      if (key === last) return;
+      last = key;
+      const current = ++revision;
+      callbacks.current.onCovered(!!hide);
+      placement.current = placement.current.catch(() => {}).then(async () => {
+        if (cancelled || current !== revision) return;
+        try {
+          await callbacks.current.apply(hide || !r ? null : r);
+        } catch (e) {
+          if (!cancelled && current === revision) {
+            last = ""; // Allow a later placement to retry.
+            callbacks.current.onError(e);
+          }
+        }
+      });
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    if (slot.current) observer.observe(slot.current);
+    // Position and covering menus can change without resizing the slot.
+    const timer = setInterval(place, 120);
+    window.addEventListener("resize", place);
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+      clearInterval(timer);
+      window.removeEventListener("resize", place);
+    };
+  }, [show, minSize, ...deps]);
+  return placement;
+}
+
 export const MUSIC_EVENT = "termlab-music";
 
 export type MusicSource =
@@ -111,7 +172,7 @@ function embedUrl(source: MusicSource): string {
     playsinline: "1",
     rel: "0",
     iv_load_policy: "3",
-    origin: window.location.origin,
+    // The page embedding the player is named by Termlab's native side (`origin`).
   });
   switch (source.kind) {
     case "video":
@@ -194,7 +255,8 @@ export function MusicCard() {
       window.removeEventListener("keydown", onKey);
     };
   }, [volumeOpen]);
-  const frame = useRef<HTMLIFrameElement>(null);
+  /** The slot the stations' web view is placed over. */
+  const stationSlot = useRef<HTMLDivElement>(null);
   const ready = useRef(false);
   /** A station whose stream stopped is retried once with the channel's current stream. */
   const retried = useRef(false);
@@ -264,56 +326,21 @@ export function MusicCard() {
   /** YouTube Music enlarged over the app (for signing in or browsing). */
   const [big, setBig] = useState(false);
   const [covered, setCovered] = useState(false);
-  const placement = useRef<Promise<unknown>>(Promise.resolve());
   const dock = useRef<HTMLDivElement>(null);
   const bigDock = useRef<HTMLDivElement>(null);
   const showYtm = enabled && (big || (open && tab === "ytm"));
-
-  // Serialize native operations so stale dock requests cannot cover a menu or a closed card.
-  useEffect(() => {
-    let cancelled = false;
-    let revision = 0;
-    let last = "";
-    const place = () => {
-      const el = big ? bigDock.current : dock.current;
-      const r = el?.getBoundingClientRect();
-      const hide = !showYtm || !r || isCovered(r) || r.width < 40 || r.height < 40
-        || r.top < 0 || r.left < 0 || r.bottom > window.innerHeight || r.right > window.innerWidth;
-      const key = hide ? "hidden" : [r.left, r.top, r.width, r.height].map(Math.round).join(",");
-      if (key === last) return;
-      last = key;
-      const current = ++revision;
-      setCovered(!!hide);
-      placement.current = placement.current.catch(() => {}).then(async () => {
-        if (cancelled || current !== revision) return;
-        try {
-          if (hide || !r) await api.youtubeMusicHide();
-          else await api.youtubeMusicDock(
-            { x: r.left, y: r.top, width: r.width, height: r.height },
-            big ? 1 : DOCK_ZOOM,
-          );
-        } catch (e) {
-          if (!cancelled && current === revision) {
-            last = ""; // Allow a later placement to retry.
-            setError(typeof e === "string" ? e : "Couldn't open YouTube Music.");
-          }
-        }
-      });
-    };
-    place();
-    const observer = new ResizeObserver(place);
-    const el = big ? bigDock.current : dock.current;
-    if (el) observer.observe(el);
-    // Position and covering menus can change without resizing the slot.
-    const timer = setInterval(place, 120);
-    window.addEventListener("resize", place);
-    return () => {
-      cancelled = true;
-      observer.disconnect();
-      clearInterval(timer);
-      window.removeEventListener("resize", place);
-    };
-  }, [showYtm, big]);
+  const placement = useNativePlacement(
+    showYtm,
+    big ? bigDock : dock,
+    40,
+    (r) =>
+      r
+        ? api.youtubeMusicDock({ x: r.left, y: r.top, width: r.width, height: r.height }, big ? 1 : DOCK_ZOOM)
+        : api.youtubeMusicHide(),
+    setCovered,
+    (e) => setError(typeof e === "string" ? e : "Couldn't open YouTube Music."),
+    [big],
+  );
   useEffect(() => () => {
     placement.current = placement.current.catch(() => {}).then(() => api.youtubeMusicHide()).catch(() => {});
   }, []);
@@ -337,72 +364,105 @@ export function MusicCard() {
   }, []);
 
   const post = useCallback((msg: object) => {
-    frame.current?.contentWindow?.postMessage(JSON.stringify(msg), YT_ORIGIN);
+    void api.stationPost(JSON.stringify(msg)).catch(() => {});
   }, []);
   const command = useCallback(
     (func: string, args: unknown[] = []) => post({ event: "command", func, args, id: 1, channel: "widget" }),
     [post],
   );
 
-  // Player → card: state, the current song and errors.
+  // The station playing, as a player address; null when stopped.
+  const playerSrc = active && source ? embedUrl(source) : null;
   useEffect(() => {
-    function onMessage(e: MessageEvent) {
-      if (e.origin !== YT_ORIGIN || e.source !== frame.current?.contentWindow) return;
-      let data: { event?: string; info?: unknown };
-      try {
-        data = typeof e.data === "string" ? JSON.parse(e.data) : e.data;
-      } catch {
-        return;
-      }
-      if (data.event === "onReady" || data.event === "initialDelivery") {
-        if (!ready.current) {
-          ready.current = true;
-          command("setVolume", [volume]);
-        }
-      }
-      if (data.event === "onError") {
-        const s = sourceRef.current;
-        if (s?.kind === "video" && s.channel && !retried.current) {
-          retried.current = true;
-          setError("This stream ended; finding the channel's current one…");
-          void api.youtubeLiveVideo(s.channel).then(
-            (video) => {
-              if (video && video !== s.video) replaceSource({ ...s, video });
-              else setError("This station isn't streaming right now.");
-            },
-            () => setError("This station isn't streaming right now."),
-          );
-          return;
-        }
-        setError(ERRORS[Number(data.info)] ?? "YouTube couldn't play this.");
-        return;
-      }
-      if (data.event === "onStateChange" && typeof data.info === "number") setState(data.info);
-      const info = data.info as
-        | { playerState?: number; videoData?: { title?: string; author?: string } }
-        | undefined;
-      if (info && typeof info === "object") {
-        if (typeof info.playerState === "number") {
-          setState(info.playerState);
-          if (info.playerState === PLAYING) setError(null);
-        }
-        const title = info.videoData?.title;
-        if (title) setNow({ title, author: info.videoData?.author ?? "" });
+    if (!playerSrc) return;
+    ready.current = false;
+    void api.stationOpen(playerSrc).catch((e) => setError(typeof e === "string" ? e : "Couldn't open the player."));
+  }, [playerSrc]);
+  useEffect(() => {
+    if (!active) void api.stationStop().catch(() => {});
+  }, [active]);
+  useEffect(() => () => void api.stationStop().catch(() => {}), []);
+  // Over the card's player slot; out of view (still playing) while YouTube Music is enlarged
+  // over the app or something of Termlab's covers the slot.
+  useNativePlacement(
+    enabled && !!playerSrc && !big,
+    stationSlot,
+    16,
+    (r) => api.stationPlace(r && { x: r.left, y: r.top, width: r.width, height: r.height }),
+    () => {},
+    () => {},
+    [open],
+  );
+
+  // Player → card: state, the current song and errors.
+  const onPlayerMessage = useRef<(raw: string) => void>(() => {});
+  onPlayerMessage.current = (raw: string) => {
+    let data: { event?: string; info?: unknown };
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (!data || typeof data !== "object") return;
+    if (data.event === "onReady" || data.event === "initialDelivery") {
+      if (!ready.current) {
+        ready.current = true;
+        command("setVolume", [volume]);
       }
     }
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, [command, volume]);
-
-  // Ask the player for events until it answers (it ignores messages before it's loaded).
-  const onFrameLoad = useCallback(() => {
-    ready.current = false;
-    let tries = 0;
+    if (data.event === "onError") {
+      const s = sourceRef.current;
+      if (s?.kind === "video" && s.channel && !retried.current) {
+        retried.current = true;
+        setError("This stream ended; finding the channel's current one…");
+        void api.youtubeLiveVideo(s.channel).then(
+          (video) => {
+            if (video && video !== s.video) replaceSource({ ...s, video });
+            else setError("This station isn't streaming right now.");
+          },
+          () => setError("This station isn't streaming right now."),
+        );
+        return;
+      }
+      setError(ERRORS[Number(data.info)] ?? "YouTube couldn't play this.");
+      return;
+    }
+    if (data.event === "onStateChange" && typeof data.info === "number") setState(data.info);
+    const info = data.info as
+      | { playerState?: number; videoData?: { title?: string; author?: string } }
+      | undefined;
+    if (info && typeof info === "object") {
+      if (typeof info.playerState === "number") {
+        setState(info.playerState);
+        if (info.playerState === PLAYING) setError(null);
+      }
+      const title = info.videoData?.title;
+      if (title) setNow({ title, author: info.videoData?.author ?? "" });
+    }
+  };
+  // The player's page queues its messages; they're collected while a station is on.
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    let busy = false;
     const timer = setInterval(() => {
-      if (ready.current || ++tries > 40) return clearInterval(timer);
-      post({ event: "listening", id: 1, channel: "widget" });
+      if (busy) return;
+      busy = true;
+      api.stationEvents().then(
+        (messages) => {
+          busy = false;
+          if (!cancelled) for (const m of messages) onPlayerMessage.current(m);
+        },
+        () => {
+          busy = false;
+        },
+      );
     }, 250);
-  }, [post]);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [active]);
 
   // A station's replacement stream: remembered, so it plays straight away next time.
   function replaceSource(next: MusicSource) {
@@ -519,15 +579,8 @@ export function MusicCard() {
             {ytm.artwork ? <img src={ytm.artwork} alt="" /> : <Icon name="music" size={16} />}
           </button>
         ) : active && source ? (
-          <iframe
-            ref={frame}
-            key={embedUrl(source)}
-            src={embedUrl(source)}
-            title={`YouTube player: ${now?.title ?? source.label}`}
-            allow="autoplay; encrypted-media; picture-in-picture"
-            referrerPolicy="strict-origin-when-cross-origin"
-            onLoad={onFrameLoad}
-          />
+          // The player itself is a web view of its own, placed over this slot.
+          <div className="music-station" ref={stationSlot} role="img" aria-label={`YouTube player: ${now?.title ?? source.label}`} />
         ) : (
           <button className="music-placeholder" onClick={playPause} aria-label="Open the music player">
             <Icon name="music" size={16} />

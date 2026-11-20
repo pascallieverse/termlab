@@ -386,15 +386,9 @@ h1, h2, h3 { margin: 0; }
 /* Expanded with the video showing: the title row (with the collapse toggle) stays on top. */
 .music-card.open.active .music-bar { order: -1; }
 .music-card.open:not(.active) .music-player { display: none; }
-.music-player iframe { width: 100%; height: 100%; border: 0; display: block; }
-/* Collapsed: the player is a tiny live thumbnail. Draw it as a full-size player scaled down,
-   and let nothing reach it, so YouTube's own hover controls and click-to-pause stay out of
-   the way; the card's buttons control it. */
-.music-card:not(.open) .music-player { position: relative; }
-.music-card:not(.open) .music-player iframe {
-  position: absolute; top: 0; left: 0; flex: none; width: 448px; height: 256px;
-  transform: scale(0.125); transform-origin: top left; pointer-events: none;
-}
+/* The slot the stations' player (a web view of its own) is placed over. Collapsed, it's a
+   tiny live thumbnail: the player's page scales itself down there (see station.rs). */
+.music-station { flex: 1; min-width: 0; align-self: stretch; }
 /* Playing from the YouTube Music window: a square cover instead of the embedded player. */
 .music-card.ytm { grid-template-columns: 40px minmax(0, 1fr); }
 .music-card.ytm .music-player, .music-card.open.ytm .music-player { display: flex; width: 40px; height: 40px; }

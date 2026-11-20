@@ -347,6 +347,20 @@ export const api = {
   youtubeMusicState: () => invoke<YouTubeMusicState | null>("youtube_music_state"),
   youtubeMusicControl: (action: "playPause" | "pause" | "next" | "previous") =>
     invoke<null>("youtube_music_control", { action }),
+  /**
+   * Plays a YouTube player address (www.youtube-nocookie.com/embed/…) in the stations' own
+   * web view. It's out of view until placed.
+   */
+  stationOpen: (src: string) => invoke<null>("station_open", { src }),
+  /** Places the stations' view over `rect` of the window (CSS pixels), or out of view for null; it keeps playing. */
+  stationPlace: (rect: { x: number; y: number; width: number; height: number } | null) =>
+    invoke<null>("station_place", { rect }),
+  /** Sends the player a message of its postMessage protocol (JSON). */
+  stationPost: (message: string) => invoke<null>("station_post", { message }),
+  /** The player's messages since the last call (JSON strings), oldest first. */
+  stationEvents: () => invoke<string[]>("station_events"),
+  /** Stops the player. */
+  stationStop: () => invoke<null>("station_stop"),
   /** The video a YouTube channel is live-streaming now (for the sidebar's music stations). */
   youtubeLiveVideo: (channel: string) => invoke<string | null>("youtube_live_video", { channel }),
   /** The computer's output volume, 0 to 100; null where it can't be read. */

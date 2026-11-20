@@ -5,6 +5,7 @@ mod commands;
 mod daemon;
 mod project_env;
 mod project_notes;
+mod station;
 mod updates;
 mod ytmusic;
 
@@ -26,7 +27,11 @@ pub fn run() {
         )
         .init();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Windows serves the stations' player page itself, on an https origin (see station.rs).
+    #[cfg(windows)]
+    let builder = builder.register_uri_scheme_protocol(station::SCHEME, station::protocol);
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
@@ -65,6 +70,11 @@ pub fn run() {
             ytmusic::youtube_music_volume,
             ytmusic::youtube_music_state,
             ytmusic::youtube_music_control,
+            station::station_open,
+            station::station_place,
+            station::station_post,
+            station::station_events,
+            station::station_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Termlab");

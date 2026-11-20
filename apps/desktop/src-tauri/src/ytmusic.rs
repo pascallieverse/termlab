@@ -128,17 +128,17 @@ fn may_return_home() -> bool {
     true
 }
 
-fn open_in_browser(url: &str) {
+pub(crate) fn open_in_browser(url: &str) {
     let _ = crate::commands::open_url(url);
 }
 
 /// Where the frontend wants the page, in CSS pixels from the window's top-left corner.
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct DockRect {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) width: f64,
+    pub(crate) height: f64,
 }
 
 /// Shows YouTube Music over `rect` of the main window at `zoom` (below 1 shrinks the page to
@@ -222,7 +222,7 @@ pub async fn youtube_music_dock(app: AppHandle, rect: DockRect, zoom: f64) -> Cm
 /// the title bar's height so it isn't hidden behind it. So page coordinates are below view
 /// coordinates by that inset, which is the difference between the view's height and the
 /// page's viewport height. Measured each time: it's zero in fullscreen.
-async fn page_origin(app: &AppHandle) -> (f64, f64) {
+pub(crate) async fn page_origin(app: &AppHandle) -> (f64, f64) {
     static LAST_INSET: std::sync::Mutex<f64> = std::sync::Mutex::new(0.0);
     let last = || LAST_INSET.lock().map(|v| *v).unwrap_or(0.0);
     let Some(main) = app.get_webview(MAIN_WINDOW) else {
@@ -259,7 +259,7 @@ fn top_inset(view_height: f64, viewport_height: f64) -> f64 {
 }
 
 /// Runs `js` in `view` and returns its result as JSON (None if it doesn't answer in time).
-async fn eval_json(view: &tauri::Webview, js: &str) -> Option<String> {
+pub(crate) async fn eval_json(view: &tauri::Webview, js: &str) -> Option<String> {
     let (tx, rx) = tokio::sync::oneshot::channel::<String>();
     let tx = std::sync::Mutex::new(Some(tx));
     view.eval_with_callback(js, move |json| {
