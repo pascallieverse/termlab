@@ -118,7 +118,7 @@ async fn connect(l: &Launch) -> anyhow::Result<Ws> {
     } else {
         None
     };
-    let (ws, _) = tokio_tungstenite::connect_async_tls_with_config(request, None, false, connector)
+    let (ws, _) = tokio_tungstenite::connect_async_tls_with_config(request, None, true, connector)
         .await
         .context("Couldn't reach the server")?;
     Ok(ws)
@@ -318,6 +318,8 @@ async fn run(launch: &Launch) -> anyhow::Result<()> {
     let mut tick = tokio::time::interval(TICK);
     let mut ping = tokio::time::interval(PING);
     ping.reset();
+    let mut refine = tokio::time::interval(platform::REFINE_TICK);
+    refine.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     declare_activity();
 
     let result: anyhow::Result<()> = loop {
@@ -410,6 +412,7 @@ async fn run(launch: &Launch) -> anyhow::Result<()> {
                 }
             }
             _ = ping.tick() => { ws.send(Message::Ping(Vec::new().into())).await?; }
+            _ = refine.tick() => stream.refine(),
         }
     };
 
@@ -432,7 +435,12 @@ pub async fn probe(secs: u64, out: PathBuf) -> anyhow::Result<()> {
     let display = displays.first().map(|d| d.id).context("no display")?;
     let (tx, mut rx) = unbounded_channel();
     let started = Instant::now();
-    let stream = start_stream(display, Quality::Balanced, &tx)?;
+    let quality = match std::env::var("PROBE_QUALITY").as_deref() {
+        Ok("low") => Quality::Low,
+        Ok("high") => Quality::High,
+        _ => Quality::Balanced,
+    };
+    let stream = start_stream(display, quality, &tx)?;
     eprintln!("capture started in {:?}", started.elapsed());
     let mut file = std::fs::File::create(&out)?;
     let mut avcc = Vec::new();
@@ -448,7 +456,7 @@ pub async fn probe(secs: u64, out: PathBuf) -> anyhow::Result<()> {
             stream.keyframe();
             asked_key = true;
         }
-        match tokio::time::timeout(left.min(Duration::from_millis(500)), rx.recv()).await {
+        match tokio::time::timeout(left.min(platform::REFINE_TICK), rx.recv()).await {
             Ok(Some(f)) => {
                 if let Some(c) = &f.config {
                     eprintln!(
@@ -463,14 +471,17 @@ pub async fn probe(secs: u64, out: PathBuf) -> anyhow::Result<()> {
                 frames += 1;
                 keys += u32::from(f.key);
                 bytes += f.data.len();
+                eprintln!(
+                    "  {:>6} ms  {:>8} bytes{}",
+                    started.elapsed().as_millis(),
+                    f.data.len(),
+                    if f.key { "  key" } else { "" }
+                );
                 file.write_all(&annex_b(&avcc, &f.data, f.key))?;
                 stream.ack();
             }
             Ok(None) => break,
-            Err(_) => {
-                // Nothing changed on screen: ask for a refresh so idle screens still test.
-                stream.keyframe();
-            }
+            Err(_) => stream.refine(),
         }
     }
     drop(stream);

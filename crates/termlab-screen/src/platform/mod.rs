@@ -5,14 +5,17 @@
 //! - `displays()`: the displays that can be shared;
 //! - `Stream::start(display, quality, frames)`: captures and encodes one display. At most
 //!   [`WINDOW`] frames are unacknowledged; newer captures replace the one waiting, so a slow
-//!   browser gets fewer frames instead of a growing delay. `ack`, `keyframe`, `bounds`;
+//!   browser gets fewer frames instead of a growing delay. `ack`, `keyframe`, `refine`, `bounds`;
 //!   dropping it stops the capture;
 //! - `Input`: posts mouse and keyboard events.
 
 use serde::Serialize;
 
 /// Frames sent but not yet decoded by the browser.
-pub const WINDOW: u32 = 4;
+pub const WINDOW: u32 = 6;
+
+/// How often the session asks the stream to sharpen a still screen (`Stream::refine`).
+pub const REFINE_TICK: std::time::Duration = std::time::Duration::from_millis(25);
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct Permissions {

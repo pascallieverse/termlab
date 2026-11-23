@@ -12,7 +12,7 @@ pub use input::Input;
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -44,7 +44,7 @@ use objc2_video_toolbox::{
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
     kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
-    kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_Main_AutoLevel,
+    kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel,
     kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -146,6 +146,8 @@ pub fn displays() -> anyhow::Result<Vec<DisplayInfo>> {
 struct Sink {
     out: UnboundedSender<Encoded>,
     inflight: Arc<AtomicU32>,
+    /// Size of the last encoded frame, to tell when refining a still screen is done.
+    last_size: Arc<AtomicUsize>,
     width: u32,
     height: u32,
     sent_config: Mutex<Option<VideoConfig>>,
@@ -242,7 +244,7 @@ impl Encoder {
             set_property(
                 &session,
                 kVTCompressionPropertyKey_ProfileLevel,
-                cf(kVTProfileLevel_H264_Main_AutoLevel),
+                cf(kVTProfileLevel_H264_High_AutoLevel),
             );
             // Key frames when asked for (a new or reset decoder), not on a timer.
             set_property(
@@ -371,6 +373,7 @@ unsafe fn encoded(sample: &CMSampleBuffer, sink: &Sink) -> Option<Encoded> {
     let key = !unsafe { not_sync(sample) };
     let block = unsafe { sample.data_buffer() }?;
     let len = unsafe { block.data_length() };
+    sink.last_size.store(len, Ordering::Release);
     let mut data = vec![0u8; len];
     let status =
         unsafe { block.copy_data_bytes(0, len, NonNull::new(data.as_mut_ptr().cast::<c_void>())?) };
@@ -418,7 +421,23 @@ struct Pipeline {
     inflight: Arc<AtomicU32>,
     force_key: AtomicBool,
     started: Instant,
+    /// When the last frame went to the encoder.
+    encoded_at: Mutex<Instant>,
+    last_size: Arc<AtomicUsize>,
+    /// Re-encodes of the still picture since the screen last changed.
+    refined: AtomicU32,
+    /// A refining pass smaller than this adds little: the picture is as sharp as it gets.
+    settled_bytes: usize,
 }
+
+/// Refining a still screen: macOS only sends a frame when something changes, so the last
+/// frame of a movement (or a key frame, which the rate control keeps small) would stay soft
+/// for as long as the screen is still. Re-encoding the same picture lets the encoder add back
+/// detail pass by pass (at 4K: about 10, 50, 80, 100, 120, 150, 35, 15, 7 KB) until a
+/// pass comes out small. Only when nothing is outstanding, so it never delays a real change.
+const REFINE_AFTER: Duration = Duration::from_millis(50);
+/// At most this many passes per still picture, whatever their size.
+const REFINE_MAX: u32 = 16;
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -426,6 +445,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl Pipeline {
     fn frame(&self, buf: Buf) {
+        self.refined.store(0, Ordering::Release);
         if self.inflight.load(Ordering::Acquire) >= WINDOW {
             *lock(&self.pending) = Some(buf);
         } else {
@@ -438,6 +458,7 @@ impl Pipeline {
         let Some(enc) = enc.as_ref() else { return };
         self.inflight.fetch_add(1, Ordering::AcqRel);
         let key = self.force_key.swap(false, Ordering::AcqRel);
+        *lock(&self.encoded_at) = Instant::now();
         if !enc.encode(&buf.0, self.started.elapsed(), key) {
             let _ = self
                 .inflight
@@ -467,6 +488,7 @@ impl Pipeline {
 
     fn keyframe(&self) {
         self.force_key.store(true, Ordering::Release);
+        self.refined.store(0, Ordering::Release);
         {
             let mut pending = lock(&self.pending);
             if pending.is_none() {
@@ -474,6 +496,23 @@ impl Pipeline {
             }
         }
         self.flush();
+    }
+
+    /// Called regularly: one more refining pass of a still screen, if it needs one.
+    fn refine(&self) {
+        if self.inflight.load(Ordering::Acquire) > 0
+            || self.refined.load(Ordering::Acquire) >= REFINE_MAX
+            || self.last_size.load(Ordering::Acquire) < self.settled_bytes
+            || lock(&self.encoded_at).elapsed() < REFINE_AFTER
+            || lock(&self.pending).is_some()
+        {
+            return;
+        }
+        let Some(buf) = lock(&self.last).as_ref().map(|b| SendBox(b.0.clone())) else {
+            return;
+        };
+        self.refined.fetch_add(1, Ordering::AcqRel);
+        self.encode(buf);
     }
 
     fn reset_window(&self) {
@@ -610,9 +649,11 @@ impl Stream {
         let height = ((width as f64 * ph / pw).round() as u32) & !1;
 
         let inflight = Arc::new(AtomicU32::new(0));
+        let last_size = Arc::new(AtomicUsize::new(0));
         let sink = Arc::new(Sink {
             out,
             inflight: inflight.clone(),
+            last_size: last_size.clone(),
             width,
             height,
             sent_config: Mutex::new(None),
@@ -625,6 +666,11 @@ impl Stream {
             inflight,
             force_key: AtomicBool::new(true),
             started: Instant::now(),
+            encoded_at: Mutex::new(Instant::now()),
+            last_size,
+            refined: AtomicU32::new(0),
+            // About 5 KB at 4K, 1.4 KB at 1080p.
+            settled_bytes: (width as usize * height as usize / 1500).max(512),
         });
 
         // SAFETY: standard ScreenCaptureKit setup with valid objects.
@@ -695,6 +741,11 @@ impl Stream {
     /// Send a key frame next (re-encoding the current screen when nothing changes).
     pub fn keyframe(&self) {
         self.pipe.keyframe();
+    }
+
+    /// Sharpen a still screen (see [`REFINE_AFTER`]); call every [`super::REFINE_TICK`].
+    pub fn refine(&self) {
+        self.pipe.refine();
     }
 
     /// Acknowledgements stopped coming (a hiccup): open the window again.

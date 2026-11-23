@@ -50,6 +50,7 @@ impl Stream {
     }
     pub fn ack(&self) {}
     pub fn keyframe(&self) {}
+    pub fn refine(&self) {}
     pub fn reset_window(&self) {}
     pub fn inflight(&self) -> u32 {
         0

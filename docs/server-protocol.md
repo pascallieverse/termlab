@@ -236,8 +236,9 @@ Machine → browser:
 
 Browser → machine:
 - `{ "type": "ack", "seq" }` for every decoded (or skipped) frame. The machine keeps at most
-  4 frames unacknowledged and skips captures meanwhile, so a slow link gets fewer frames, not
-  more delay.
+  6 frames unacknowledged and skips captures meanwhile, so a slow link gets fewer frames, not
+  more delay. Once the screen is still, it re-encodes the last picture (as ordinary delta
+  frames) until it is sharp.
 - `{ "type": "keyframe" }`: the decoder was reset; send a key frame.
 - `{ "type": "display", "id" }`, `{ "type": "quality", "quality" }`
 - `{ "type": "pointer", "x": 0..1, "y": 0..1, "action": "move" | "down" | "up", "button": 0 | 1 | 2, "clicks": n }`

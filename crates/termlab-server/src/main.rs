@@ -150,6 +150,10 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("listening on {listen}"))?;
     tracing::info!(%listen, public_url = %app.cfg.public_url, "termlab-server started");
+    // No Nagle: screen frames and their acknowledgements are small and latency-bound.
+    let listener = axum::serve::ListenerExt::tap_io(listener, |tcp| {
+        let _ = tcp.set_nodelay(true);
+    });
     axum::serve(
         listener,
         router(app).into_make_service_with_connect_info::<SocketAddr>(),

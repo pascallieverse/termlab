@@ -159,8 +159,10 @@ To see and control a Mac's screen from the server:
    Machines) and enter a code from your authenticator app.
 
 The picture is H.264, decoded by the browser (Chrome, Edge, Firefox 130+ or Safari 16.4+).
-It goes through the server: count on 1–4 Mbit/s while the screen changes, almost nothing
-while it doesn't. On a phone, the screen works as a trackpad: drag to move the pointer, tap
+It goes through the server: while the screen changes, count on up to 1.5 Mbit/s (Low,
+1280 pixels wide, 30 fps), 6 Mbit/s (Balanced, 1920, 60 fps) or 16 Mbit/s (Sharp, up to 4K,
+60 fps); almost nothing while it doesn't. When the screen stops changing, the picture is
+sent again a few times so text sharpens; the fps counter then drops, which is expected. On a phone, the screen works as a trackpad: drag to move the pointer, tap
 to click, two fingers to scroll, pinch to zoom, press and hold to drag; the Keyboard button
 opens the phone's keyboard, with a bar for ⌘, ⌥, ⌃, ⇧, Esc, Tab and the arrows.
 

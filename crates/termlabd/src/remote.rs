@@ -256,7 +256,7 @@ impl Bridge {
             None
         };
         let (ws, _) =
-            tokio_tungstenite::connect_async_tls_with_config(request, None, false, connector)
+            tokio_tungstenite::connect_async_tls_with_config(request, None, true, connector)
                 .await
                 .map_err(|e| match e {
                     tokio_tungstenite::tungstenite::Error::Http(res)

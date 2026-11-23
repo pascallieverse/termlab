@@ -58,9 +58,10 @@ impl Quality {
     /// (largest width in pixels, frames per second, average bits per second)
     pub fn params(self) -> (u32, u32, u32) {
         match self {
-            Quality::Low => (1280, 15, 1_200_000),
-            Quality::Balanced => (1920, 30, 4_000_000),
-            Quality::High => (2880, 30, 10_000_000),
+            Quality::Low => (1280, 30, 1_500_000),
+            Quality::Balanced => (1920, 60, 6_000_000),
+            // Up to 4K: a Retina display at its full pixel size, for 1:1 viewing.
+            Quality::High => (3840, 60, 16_000_000),
         }
     }
 }
