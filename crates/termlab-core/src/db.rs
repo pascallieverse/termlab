@@ -492,6 +492,16 @@ impl Db {
         Ok(rows)
     }
 
+    pub fn set_origin(&self, id: SessionId, origin: SessionOrigin) -> Result<()> {
+        self.expect_one(
+            self.conn.execute(
+                "UPDATE sessions SET origin = ?2 WHERE id = ?1",
+                params![id.to_string(), origin.as_str()],
+            )?,
+            id,
+        )
+    }
+
     pub fn set_term_size(&self, id: SessionId, size: TermSize) -> Result<()> {
         self.conn.execute(
             "UPDATE sessions SET term_cols = ?2, term_rows = ?3 WHERE id = ?1",

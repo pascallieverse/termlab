@@ -845,6 +845,15 @@ impl Termlab {
             mode,
         };
         let spec = self.command_for(&req, id, true)?;
+        // Resumed rather than re-attached, the agent now runs in Termlab's own terminal.
+        let origin = if matches!(req.mode, StartMode::Attach { .. }) {
+            SessionOrigin::Attached
+        } else {
+            SessionOrigin::Termlab
+        };
+        if rec.origin != origin && rec.origin != SessionOrigin::Imported {
+            self.db().set_origin(id, origin)?;
+        }
         let history = scrollback::load(&self.config.dirs.scrollback_path(id))?.unwrap_or_default();
         let mut sb = Scrollback::with_contents(self.config.scrollback_cap, &history);
         sb.push(b"\r\n\x1b[2m[termlab] resumed\x1b[0m\r\n");
@@ -863,25 +872,20 @@ impl Termlab {
                 "this session's agent id isn't known, so it can't be resumed".into(),
             )
         })?;
-        // An attached session is re-attached: the agent kept running it in the background.
-        // Anything else is resumed, unless the agent is running it somewhere right now.
-        Ok(if rec.origin == SessionOrigin::Attached {
-            let ext = self
-                .external_sessions()
-                .into_iter()
-                .find(|e| {
-                    e.running.agent == rec.agent && e.running.agent_session_id == agent_session_id
-                })
-                .ok_or_else(|| {
-                    CoreError::InvalidInput("that background session isn't running any more".into())
-                })?;
-            StartMode::Attach {
+        // An attached session is re-attached while the agent still runs it in the background.
+        // Anything else is resumed, unless the agent is running it somewhere right now; so is
+        // an attached one whose background session is gone (stopped, or lost with a restart).
+        if rec.origin == SessionOrigin::Attached
+            && let Some(ext) = self.external_sessions().into_iter().find(|e| {
+                e.running.agent == rec.agent && e.running.agent_session_id == agent_session_id
+            })
+        {
+            return Ok(StartMode::Attach {
                 running: ext.running,
-            }
-        } else {
-            self.ensure_not_running_elsewhere(rec.agent, &agent_session_id)?;
-            StartMode::Resume { agent_session_id }
-        })
+            });
+        }
+        self.ensure_not_running_elsewhere(rec.agent, &agent_session_id)?;
+        Ok(StartMode::Resume { agent_session_id })
     }
 
     fn spawn(

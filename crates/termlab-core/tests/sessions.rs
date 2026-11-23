@@ -767,6 +767,8 @@ struct HistoryAdapter {
     other_folder: PathBuf,
     /// The background sessions the agent was asked to restart itself.
     respawned: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Set once the background session has stopped (or was lost with a restart).
+    bg_gone: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AgentAdapter for HistoryAdapter {
@@ -812,6 +814,9 @@ impl AgentAdapter for HistoryAdapter {
         ]
     }
     fn running(&self, _p: &Path, _env: &UserEnv) -> Vec<termlab_core::adapter::RunningSession> {
+        if self.bg_gone.load(std::sync::atomic::Ordering::SeqCst) {
+            return Vec::new();
+        }
         vec![termlab_core::adapter::RunningSession {
             agent: AgentId::Claude,
             agent_session_id: "bg-1".into(),
@@ -856,9 +861,11 @@ async fn loads_sessions_from_everywhere_imports_and_attaches() {
     let other_path = other.path().canonicalize().unwrap();
     let mut config = TermlabConfig::new(DataDirs::new(data.path()), test_env());
     let respawned = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let bg_gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
     config.adapters = vec![Box::new(HistoryAdapter {
         other_folder: other_path.clone(),
         respawned: respawned.clone(),
+        bg_gone: bg_gone.clone(),
     })];
     let tl = Termlab::open(config).unwrap();
 
@@ -958,6 +965,22 @@ async fn loads_sessions_from_everywhere_imports_and_attaches() {
     let err = tl.respawn(imported.record.id).unwrap_err().to_string();
     assert!(err.contains("can't restart this session itself"), "{err}");
 
+    tl.stop(attached.record.id).unwrap();
+    wait_for_exit_status(&tl, attached.record.id, SessionStatus::Done).await;
+
+    // Once the background session is gone there's nothing to attach to: resuming continues
+    // the conversation in Termlab's own terminal instead, and it stays that way.
+    bg_gone.store(true, std::sync::atomic::Ordering::SeqCst);
+    let resumed = tl.restart(attached.record.id, None).unwrap();
+    assert!(resumed.live);
+    assert_eq!(
+        resumed.record.origin,
+        termlab_core::model::SessionOrigin::Termlab
+    );
+    let att = tl.attach(attached.record.id).unwrap();
+    let mut rx = att.events;
+    let mut buf = String::new();
+    wait_for(&mut rx, &mut buf, "ARGS: resume bg-1").await;
     tl.stop(attached.record.id).unwrap();
     wait_for_exit_status(&tl, attached.record.id, SessionStatus::Done).await;
 }
