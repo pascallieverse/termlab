@@ -1,4 +1,4 @@
-// Builds `termlabd` and `termlab-hook` for the platform being packaged and puts them where
+// Builds `termlabd`, `termlab-hook` and `termlab-screen` for the platform being packaged and puts them where
 // the bundler expects programs that ship next to the app: `src-tauri/binaries/<name>-<target>`.
 //
 // Run by `npm run bundle` (see `src-tauri/release.conf.json`). The Tauri CLI passes the
@@ -26,13 +26,13 @@ const targetDir = JSON.parse(
 
 execFileSync(
   "cargo",
-  ["build", "--release", "--target", target, "-p", "termlabd", "-p", "termlab-hook"],
+  ["build", "--release", "--target", target, "-p", "termlabd", "-p", "termlab-hook", "-p", "termlab-screen"],
   { cwd: root, stdio: "inherit" },
 );
 
 const out = join(desktop, "src-tauri", "binaries");
 mkdirSync(out, { recursive: true });
-for (const name of ["termlabd", "termlab-hook"]) {
+for (const name of ["termlabd", "termlab-hook", "termlab-screen"]) {
   const built = join(targetDir, target, "release", name + exe);
   const placed = join(out, `${name}-${target}${exe}`);
   copyFileSync(built, placed);

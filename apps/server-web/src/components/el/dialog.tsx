@@ -10,12 +10,21 @@ export function Dialog({
     title,
     description,
     children,
+    width,
+    head,
+    footer,
 }: {
     open: boolean;
     onClose: () => void;
     title: ReactNode;
     description?: ReactNode;
     children: ReactNode;
+    /** As the desktop app's dialogs: a fixed width (else a narrow one). */
+    width?: number;
+    /** Extra controls in the header, after the title. */
+    head?: ReactNode;
+    /** A row under the body, with its own top border (the desktop's dialog-foot). */
+    footer?: ReactNode;
 }) {
     const box = useRef<HTMLDivElement>(null);
     const titleId = useId();
@@ -64,15 +73,17 @@ export function Dialog({
                 aria-labelledby={titleId}
                 aria-describedby={description ? descId : undefined}
                 tabIndex={-1}
-                className="flex max-h-[88dvh] w-full max-w-md flex-col overflow-hidden rounded-[14px] border border-line-strong bg-panel text-ink shadow-[0_24px_80px_rgba(0,0,0,0.5)] outline-none"
+                style={width ? { width: `min(${width}px, calc(100vw - 32px))` } : undefined}
+                className={`flex max-h-[88dvh] flex-col overflow-hidden rounded-[14px] border border-line-strong bg-panel text-ink shadow-[0_24px_80px_rgba(0,0,0,0.5)] outline-none ${width ? '' : 'w-full max-w-md'}`}
             >
                 <div className="flex items-start justify-between gap-3 border-b border-line px-[22px] py-[18px]">
-                    <div className="flex flex-col gap-0.5">
+                    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-0.5">
                         <h2 id={titleId} className="m-0 text-lg font-semibold">
                             {title}
                         </h2>
+                        {head}
                         {description && (
-                            <p id={descId} className="m-0 text-[13px] text-dim">
+                            <p id={descId} className="m-0 w-full text-[13px] text-dim">
                                 {description}
                             </p>
                         )}
@@ -89,6 +100,7 @@ export function Dialog({
                     </button>
                 </div>
                 <div className="flex flex-col gap-4 overflow-y-auto px-[22px] py-[18px]">{children}</div>
+                {footer && <div className="flex flex-wrap items-center gap-2.5 border-t border-line px-[22px] py-3.5">{footer}</div>}
             </div>
         </div>
     );

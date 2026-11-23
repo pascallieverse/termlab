@@ -4,6 +4,7 @@
 you open it in a browser or on your phone to:
 
 - see every session live, answer approvals, and type into a session's terminal;
+- see a computer's screen and use its mouse and keyboard (macOS, Termlab 0.2.11+);
 - get a push notification on your phone when a session needs you;
 - send signed webhooks (Slack, CI, your own scripts) when sessions change.
 
@@ -144,6 +145,31 @@ computer.
 On a phone, open the server in the browser and add it to the home screen. That's needed for
 notifications on iPhone. Then turn on notifications in **Settings › Notifications**.
 
+### Screen sharing
+
+To see and control a Mac's screen from the server:
+
+1. On the Mac, in Termlab, open **Settings › Remote access** and switch on **Allow screen
+   sharing**. Allow Termlab under **Screen Recording** and **Accessibility** when macOS asks
+   (Termlab has buttons that open the right pages in System Settings). Without
+   Accessibility the screen is view only.
+2. Optionally switch on **Ask on this computer each time**: someone at the Mac then has to
+   click Allow before each session.
+3. On the server, click **Screen** in the header (or on the machine under Settings ›
+   Machines) and enter a code from your authenticator app.
+
+The picture is H.264, decoded by the browser (Chrome, Edge, Firefox 130+ or Safari 16.4+).
+It goes through the server: count on 1–4 Mbit/s while the screen changes, almost nothing
+while it doesn't. On a phone, the screen works as a trackpad: drag to move the pointer, tap
+to click, two fingers to scroll, pinch to zoom, press and hold to drag; the Keyboard button
+opens the phone's keyboard, with a bar for ⌘, ⌥, ⌃, ⇧, Esc, Tab and the arrows.
+
+The Mac stays awake and doesn't lock while a session runs. A Mac that is already locked, at
+the login window or asleep can't be shared yet.
+
+macOS remembers the two permissions per app build. A Termlab built without a Developer ID
+signature asks again after each update.
+
 ## Settings
 
 Every setting is a flag or an environment variable.
@@ -170,6 +196,12 @@ Every setting is a flag or an environment variable.
   - Unlinking in Termlab removes it from the server.
 - **The audit log** (Settings) records sign-ins, failed sign-ins, every approval, message,
   stop and hold, and pairing and webhook changes, with the address they came from.
+- **Screen sharing** is off until it's switched on in Termlab on that computer; the server
+  can't switch it on. Each session needs an authenticator code (again after 10 minutes), and
+  can need someone at the computer to allow it. macOS shows its screen-recording indicator
+  while it runs, and Termlab's settings show who is connected, with a Stop button.
+  Switching it off ends a running session. The server relays the picture and input without
+  storing them. The audit log records each session's start and end and wrong codes.
 - **Terminal data:** Termlab only streams a terminal while you have it open, and the server
   passes it through without storing it. What the server stores is session status, the
   last few screen lines, and webhook delivery logs.

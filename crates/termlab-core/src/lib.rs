@@ -12,6 +12,7 @@ pub mod model;
 pub mod notes;
 pub mod pty;
 pub mod remote;
+pub mod screen;
 pub mod scrollback;
 pub mod service;
 pub mod status;

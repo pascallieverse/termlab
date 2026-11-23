@@ -746,6 +746,7 @@ legend.label { margin-bottom: 8px; }
 .settings-status { display: inline-flex; align-items: center; gap: 8px; }
 .dot.ok { background: var(--done); }
 .dot.bad { background: var(--error); }
+.dot.warn { background: var(--accent); }
 .settings-warning { display: flex; align-items: flex-start; gap: 8px; margin: 0; color: var(--amber-text); line-height: 1.45; }
 .settings-warning svg { flex: 0 0 auto; margin-top: 2px; }
 

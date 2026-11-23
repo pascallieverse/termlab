@@ -14,6 +14,7 @@ export const ICONS = {
         </>
     ),
     machines: <path d="M4 4h16v12H4zM8 20h8M12 16v4" />,
+    screen: <path d="M3 4h18v12H3zM8 20h8M12 16v4M10 8l4 2.5-1.7.6-.8 1.6z" />,
     webhooks: (
         <>
             <path d="M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c.01-.7.2-1.4.57-2" />

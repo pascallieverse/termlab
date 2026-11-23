@@ -4,7 +4,7 @@
 // shows and changes it.
 
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { api, type RemoteStatus } from "./api";
+import { api, type RemoteStatus, type ScreenStatus } from "./api";
 
 /** How to run a Termlab server. */
 export const SELF_HOSTING_GUIDE = "https://github.com/pascallieverse/termlab/blob/main/docs/self-hosting.md";
@@ -213,6 +213,7 @@ function Linked({
         <Row title="Server" desc={`${status.accountName ?? "Termlab server"} · ${server}`} />
         <Row title="This computer" desc={status.machineName ?? "—"} />
       </Group>
+      <ScreenSharing Group={Group} Row={Row} />
       <Group title="Unlink" note="The computer disappears from your server's Machines list. Sessions here keep running.">
         <Row
           title={confirm ? "Unlink this computer?" : "Stop sharing this computer"}
@@ -240,5 +241,133 @@ function Linked({
         )}
       </Group>
     </>
+  );
+}
+
+/**
+ * Screen sharing: see and control this computer from the server's web page. Off unless
+ * switched on here; the server can't switch it on. Each session there also needs a code
+ * from the owner's authenticator app.
+ */
+function ScreenSharing({
+  Group,
+  Row,
+}: {
+  Group: (p: { title: string; note?: ReactNode; children: ReactNode }) => ReactNode;
+  Row: (p: { title: ReactNode; desc?: ReactNode; labelId?: string; children?: ReactNode }) => ReactNode;
+}) {
+  const [s, setS] = useState<ScreenStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    const load = () => api.screenStatus().then((x) => live && setS(x), () => {});
+    void load();
+    const timer = window.setInterval(load, 2000);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  if (!s) return null;
+
+  if (!s.supported) {
+    return (
+      <Group title="Screen sharing">
+        <Row title="Not available yet" desc="Seeing and controlling this computer's screen from your server works on macOS for now." />
+      </Group>
+    );
+  }
+
+  async function set(enabled: boolean, confirm: boolean) {
+    setError(null);
+    try {
+      setS(await api.screenSet(enabled, confirm));
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  const since = s.active ? new Date(s.active.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+
+  return (
+    <Group
+      title="Screen sharing"
+      note={
+        <>
+          See this computer's screen and use its mouse and keyboard from your server's web page,
+          after entering a code from your authenticator app. Only this switch can turn it on. The
+          picture and your input go through your server and aren't stored; each session is in its
+          audit log.
+        </>
+      }
+    >
+      {s.active && (
+        <Row
+          title={
+            <span className="settings-status">
+              <span className="dot warn" aria-hidden="true" />
+              In use since {since}
+            </span>
+          }
+          desc={s.active.viewer || "Someone signed in to your server"}
+        >
+          <button className="btn small danger" onClick={() => void api.screenStop().catch((e) => setError(String(e)))}>
+            Stop
+          </button>
+        </Row>
+      )}
+      <label className="settings-row clickable">
+        <span className="settings-row-text">
+          <span className="settings-row-title">Allow screen sharing</span>
+          <span className="muted small">Your server can show this screen and control it.</span>
+        </span>
+        <input type="checkbox" role="switch" className="switch" checked={s.enabled} onChange={(e) => void set(e.target.checked, s.confirm)} />
+      </label>
+      <label className="settings-row clickable">
+        <span className="settings-row-text">
+          <span className="settings-row-title">Ask on this computer each time</span>
+          <span className="muted small">Someone here has to click Allow before a session starts.</span>
+        </span>
+        <input
+          type="checkbox"
+          role="switch"
+          className="switch"
+          checked={s.confirm}
+          disabled={!s.enabled}
+          onChange={(e) => void set(s.enabled, e.target.checked)}
+        />
+      </label>
+      {s.enabled && (
+        <>
+          <Row
+            title="Screen Recording"
+            desc={s.screenAllowed ? "Allowed." : "Needed to show the screen. Allow Termlab in System Settings › Privacy & Security."}
+          >
+            {!s.screenAllowed && (
+              <button className="btn small primary" onClick={() => void api.screenRequestPermission("screen")}>
+                Allow…
+              </button>
+            )}
+          </Row>
+          <Row
+            title="Accessibility"
+            desc={s.inputAllowed ? "Allowed: the mouse and keyboard can be used." : "Needed for the mouse and keyboard; without it the screen is view only."}
+          >
+            {!s.inputAllowed && (
+              <button className="btn small primary" onClick={() => void api.screenRequestPermission("input")}>
+                Allow…
+              </button>
+            )}
+          </Row>
+        </>
+      )}
+      {error && (
+        <p className="error-text small" role="alert" style={{ margin: "0 14px 12px" }}>
+          {error}
+        </p>
+      )}
+    </Group>
   );
 }

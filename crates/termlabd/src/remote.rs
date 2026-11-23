@@ -12,7 +12,10 @@
 //! - plan usage (how much of each agent's subscription limits is used) goes up when it
 //!   changes;
 //! - the project list (in the sidebar's order) and the installed agents go up, so the browser
-//!   can start sessions and reorder projects; both act here, so the app sees them at once.
+//!   can start sessions and reorder projects; both act here, so the app sees them at once;
+//! - whether screen sharing is switched on goes up (it can only be switched in the app); a
+//!   screen session (`screen.open`) starts `termlab-screen`, which streams over a websocket
+//!   of its own.
 //!
 //! The protocol is in `docs/server-protocol.md`.
 
@@ -34,7 +37,7 @@ use termlab_core::model::{
 };
 use termlab_core::pty::PtyEvent;
 use termlab_core::remote::{PairRequest, RemoteControl, RemoteFuture, RemoteState, RemoteStatus};
-use termlab_core::{CoreEvent, DataDirs, StartRequest, Termlab, git, notes};
+use termlab_core::{CoreEvent, DataDirs, StartRequest, Termlab, git, notes, screen};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
@@ -106,6 +109,8 @@ pub struct Bridge {
     os: String,
     inner: Mutex<Inner>,
     branches: Mutex<HashMap<FolderId, (Option<String>, Instant)>>,
+    /// `termlab-screen`, next to this binary (absent in some development builds).
+    screen_helper: Option<PathBuf>,
 }
 
 impl Bridge {
@@ -135,6 +140,13 @@ impl Bridge {
             http,
             default_name: default_machine_name(),
             os: os_description(),
+            screen_helper: std::env::current_exe()
+                .ok()
+                .and_then(|exe| {
+                    let name = format!("{}{}", screen::HELPER, std::env::consts::EXE_SUFFIX);
+                    exe.parent().map(|d| d.join(name))
+                })
+                .filter(|p| p.exists()),
             inner: Mutex::new(Inner {
                 paired,
                 state,
@@ -262,9 +274,10 @@ impl Bridge {
 
         send(
             &mut sink,
-            json!({ "type": "hello", "protocol": PROTOCOL, "version": VERSION, "os": self.os }),
+            json!({ "type": "hello", "protocol": PROTOCOL, "version": VERSION, "os": self.os, "screen": self.screen_caps() }),
         )
         .await?;
+        let mut screen_sent = self.screen_caps();
         let mut synced: HashSet<SessionId> = HashSet::new();
         self.full_sync(&mut sink, &mut synced).await?;
         let mut notes_at = self.send_notes(&mut sink).await?;
@@ -317,6 +330,7 @@ impl Bridge {
                             let _ = self.tl.write(id, bytes);
                         },
                         "project.move" => self.move_project(&m),
+                        "screen.open" => self.open_screen(cfg, &m, out_tx.clone()),
                         "session.start" => self.start_session(&m, out_tx.clone()),
                         "notes.save" => {
                             if let Err(e) = self.save_notes(&m).await {
@@ -386,6 +400,11 @@ impl Bridge {
                         notes_at = self.send_notes(&mut sink).await?;
                     }
                     usage_sent = self.send_usage(&mut sink, Some(usage_sent)).await?;
+                    let caps = self.screen_caps();
+                    if caps != screen_sent {
+                        send(&mut sink, json!({ "type": "screen.state", "screen": caps })).await?;
+                        screen_sent = caps;
+                    }
                 }
                 _ = ping.tick() => {
                     if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
@@ -407,6 +426,66 @@ impl Bridge {
             self.give_back_size(&mut held, id);
         }
         result
+    }
+
+    /// Screen sharing as the server sees it: can this computer share, and is it on.
+    fn screen_caps(&self) -> Value {
+        let s = screen::load(&self.data_dir);
+        let supported = screen::supported() && self.screen_helper.is_some();
+        json!({ "supported": supported, "enabled": supported && s.enabled })
+    }
+
+    /// A browser opened a screen session: start `termlab-screen` for it, or say why not.
+    fn open_screen(&self, cfg: &Paired, m: &Value, out: mpsc::Sender<String>) {
+        let Some(sid) = m["sid"].as_str().filter(|s| {
+            !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric())
+        }) else {
+            return;
+        };
+        let refuse = |error: &str| {
+            let _ = out.try_send(
+                json!({ "type": "screen.refused", "sid": sid, "error": error }).to_string(),
+            );
+        };
+        let settings = screen::load(&self.data_dir);
+        let Some(helper) = self.screen_helper.clone().filter(|_| screen::supported()) else {
+            return refuse("Screen sharing isn't available on this computer.");
+        };
+        if !settings.enabled {
+            return refuse(
+                "Screen sharing is off on this computer. Switch it on there, in Termlab › Settings › Remote access.",
+            );
+        }
+        let launch = json!({
+            "server_url": cfg.server_url,
+            "token": cfg.token,
+            "sid": sid,
+            "data_dir": self.data_dir,
+            "viewer": m["viewer"].as_str().map(|s| clip(s, 200)).unwrap_or_default(),
+        });
+        let child = tokio::process::Command::new(&helper)
+            .arg("serve")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "remote: screen helper didn't start");
+                return refuse("The screen helper didn't start on this computer.");
+            }
+        };
+        tracing::info!(sid, "remote: screen session starting");
+        // The token goes over stdin, not the command line (which other users can see).
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(format!("{launch}\n").as_bytes()).await;
+            }
+            let status = child.wait().await;
+            tracing::info!(?status, "remote: screen session ended");
+        });
     }
 
     /// Sends the full session list.
@@ -565,6 +644,7 @@ impl Bridge {
             .as_str()
             .filter(|s| !s.trim().is_empty())
             .map(|s| clip(s, 20_000));
+        let notify = m["notify"].as_bool().unwrap_or(true);
         let tl = self.tl.clone();
         tokio::task::spawn_blocking(move || {
             let result = (|| {
@@ -580,7 +660,7 @@ impl Bridge {
                     permission,
                     first_message,
                     size: Some(TermSize::default()),
-                    notify: true,
+                    notify,
                     title: None,
                     mode: Default::default(),
                 };

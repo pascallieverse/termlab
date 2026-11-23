@@ -323,6 +323,17 @@ pub fn machine_view(app: &AppRef, id: i64) -> rusqlite::Result<Option<Value>> {
 }
 
 pub fn machines(app: &AppRef) -> rusqlite::Result<Vec<Value>> {
+    let mut list = machine_rows(app)?;
+    for m in &mut list {
+        if let Some(id) = m["id"].as_i64() {
+            // Screen sharing (Termlab 0.2.11+): { supported, enabled, active } or null.
+            m["screen"] = app.hub.screen.view(id);
+        }
+    }
+    Ok(list)
+}
+
+fn machine_rows(app: &AppRef) -> rusqlite::Result<Vec<Value>> {
     app.db.with(|c| {
         let mut st = c.prepare(
             "select m.id, m.name, m.os, m.version, m.online, m.last_seen_at,

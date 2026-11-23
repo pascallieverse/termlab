@@ -84,11 +84,7 @@ export function ProjectNotes({ session, online }: { session: RemoteSession; onli
                             if (e.key === 'Escape') e.currentTarget.blur();
                         }}
                     />
-                    <p className="m-0 text-xs text-faint">
-                        {editable
-                            ? 'Shared by every session in this project, and synced with Termlab.'
-                            : `${session.machine} is offline: these are the last notes it sent.`}
-                    </p>
+                    {!editable && <p className="m-0 text-xs text-faint">{session.machine} is offline: these are the last notes it sent.</p>}
                 </>
             )}
         </section>

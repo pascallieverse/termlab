@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/termlab-core", "crates/termlab-hook", "crates/termlabd", "crates/termlab-server", "apps/desktop/src-tauri"]
+members = ["crates/termlab-core", "crates/termlab-hook", "crates/termlabd", "crates/termlab-screen", "crates/termlab-server", "apps/desktop/src-tauri"]
 
 [workspace.package]
 version = "0.2.10"

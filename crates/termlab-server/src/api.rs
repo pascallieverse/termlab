@@ -383,6 +383,7 @@ struct StartSession {
     permission: String,
     model: Option<String>,
     message: Option<String>,
+    notify: Option<bool>,
 }
 
 /// Starts a new session on a machine, in one of its projects, with an agent installed there.
@@ -449,6 +450,7 @@ async fn start_session(
         &json!({
             "type": "session.start", "request_id": b.request_id, "folder_id": b.folder_id,
             "agent": b.agent, "permission": b.permission, "model": b.model, "message": b.message,
+            "notify": b.notify.unwrap_or(true),
         }),
     );
     if !sent {
@@ -900,7 +902,7 @@ async fn redeliver(
 
 // ---- account ---------------------------------------------------------------------------
 
-fn owner_row(app: &AppRef) -> ApiResult<(String, String)> {
+pub(crate) fn owner_row(app: &AppRef) -> ApiResult<(String, String)> {
     app.db
         .with(|c| {
             c.query_row(

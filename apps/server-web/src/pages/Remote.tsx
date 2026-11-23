@@ -10,7 +10,7 @@ import { NewSessionDialog } from '@/components/remote/new-session-dialog';
 import { SessionFocus } from '@/components/remote/session-focus';
 import { UsageChip } from '@/components/remote/usage-chip';
 import { useNarrow } from '@/components/remote/use-narrow';
-import { BottomNav, TopBar } from '@/layouts/nav';
+import { BottomNav, Icon, TopBar } from '@/layouts/nav';
 import { useLive } from '@/live/LiveProvider';
 import { STATUS, agentName, relativeTime, timeAgo } from '@/lib/format';
 import { cn } from '@/lib/utils';
@@ -171,6 +171,32 @@ type Shared = {
     /** Opens the New session dialog, optionally on a machine's project. */
     startNew: (at?: { machineId: number; folderId?: number }) => void;
 };
+
+/**
+ * Opens the shown machine's screen (or the only one that can share it, under All machines).
+ * Hidden for computers whose Termlab can't share its screen.
+ */
+function ScreenChip({ machines, machineId }: Pick<Shared, 'machines' | 'machineId'>) {
+    const capable = machines.filter((m) => m.screen?.supported);
+    const m = machineId === 'all' ? (capable.length === 1 ? capable[0] : undefined) : capable.find((x) => x.id === machineId);
+    if (!m) {
+        return null;
+    }
+    const active = (m.screen?.active ?? 0) > 0;
+
+    return (
+        <Link
+            to={`/screen/${m.id}`}
+            className={cn('hchip no-underline hover:border-outline-strong', !m.online && 'pointer-events-none opacity-50')}
+            aria-disabled={!m.online || undefined}
+            title={m.online ? `See and control ${m.name}’s screen` : `${m.name} is offline`}
+        >
+            <Icon name="screen" size={14} />
+            Screen
+            {active && <span aria-label="in use" className="dot" style={{ background: '#F5A524' }} />}
+        </Link>
+    );
+}
 
 /** Which machine's sessions to show: a header chip. */
 function MachineSelect({ machines, machineId, setMachineId }: Pick<Shared, 'machines' | 'machineId' | 'setMachineId'>) {
@@ -357,6 +383,7 @@ function DesktopLayout({
                         </button>
                     )}
                     <MachineSelect machines={machines} machineId={machineId} setMachineId={setMachineId} />
+                    <ScreenChip machines={machines} machineId={machineId} />
                     <UsageChip />
                 </div>
             </TopBar>

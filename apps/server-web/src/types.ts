@@ -52,6 +52,17 @@ export type Machine = {
     running: number;
     /** Its Termlab syncs project notes. */
     notes_sync?: boolean;
+    /** Screen sharing (Termlab 0.2.11+); null or absent: its Termlab can't share its screen. */
+    screen?: MachineScreen | null;
+};
+
+export type MachineScreen = {
+    /** This computer's operating system is supported. */
+    supported: boolean;
+    /** Switched on in its Termlab (only there: the server can't switch it on). */
+    enabled: boolean;
+    /** Screen sessions running now. */
+    active: number;
 };
 
 /** A project folder on a machine, in Termlab's sidebar order (0.2.9+). */
@@ -70,6 +81,8 @@ export type StartSessionRequest = {
     permission: PermissionPreset;
     model?: string | null;
     message?: string | null;
+    /** Notify when it needs input (Termlab 0.2.10+; before, always). */
+    notify?: boolean;
 };
 
 /** A project's notes, as the machine last reported them. */

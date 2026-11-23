@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { AppStateContext } from '@/app-state';
 import { ToastProvider } from '@/components/el/toast';
+import { ScreenViewer } from '@/components/screen/screen-viewer';
 import { LiveProvider } from '@/live/LiveProvider';
 import { api, setUnauthorizedHandler } from '@/lib/api';
 import Login from '@/pages/Login';
@@ -17,7 +18,9 @@ import type { ServerState } from '@/types';
 function Main() {
     const path = useLocation().pathname;
     const settings = path === '/settings' || path.startsWith('/settings/');
-    if (!settings && path !== '/remote') {
+    // A computer's screen: /screen/<machine id>, over the sessions.
+    const screen = /^\/screen\/(\d+)$/.exec(path);
+    if (!settings && !screen && path !== '/remote') {
         return <Navigate to="/remote" replace />;
     }
 
@@ -25,6 +28,7 @@ function Main() {
         <>
             <Remote />
             {settings && <Settings />}
+            {screen && <ScreenViewer key={screen[1]} machineId={Number(screen[1])} />}
         </>
     );
 }

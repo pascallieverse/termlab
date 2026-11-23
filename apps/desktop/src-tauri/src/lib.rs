@@ -5,6 +5,7 @@ mod commands;
 mod daemon;
 mod project_env;
 mod project_notes;
+mod screen;
 mod station;
 mod updates;
 mod ytmusic;
@@ -52,6 +53,10 @@ pub fn run() {
             project_env::save_project_env,
             project_notes::read_project_notes,
             project_notes::save_project_notes,
+            screen::screen_status,
+            screen::screen_set,
+            screen::screen_request_permission,
+            screen::screen_stop,
             commands::daemon_call,
             commands::attach_session,
             commands::detach_session,

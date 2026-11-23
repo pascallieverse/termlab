@@ -44,6 +44,8 @@ struct Inner {
 pub struct Hub {
     inner: Mutex<Inner>,
     next: AtomicU64,
+    /// Screen sessions (`screen.rs`).
+    pub screen: crate::screen::ScreenHub,
 }
 
 fn send(tx: &Tx, v: &Value) {
@@ -139,6 +141,7 @@ impl Hub {
 
     /// The machine was removed: tell it, then close its socket.
     pub fn revoke_machine(&self, machine: i64) {
+        self.screen.close_machine(machine);
         let mut g = self.lock();
         if let Some(m) = g.machines.remove(&machine) {
             send(
@@ -175,6 +178,7 @@ impl Hub {
 
     /// Closes every browser connection of a web session (it signed out or was revoked).
     pub fn close_web_session(&self, web_session: i64) {
+        self.screen.close_web_session(web_session);
         let g = self.lock();
         for b in g.browsers.values().filter(|b| b.web_session == web_session) {
             let _ = b.tx.send(Outgoing::Close);

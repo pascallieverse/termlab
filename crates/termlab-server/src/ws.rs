@@ -252,6 +252,10 @@ fn handle_machine(app: &AppRef, machine: i64, text: &str) {
     };
     match msg["type"].as_str().unwrap_or("") {
         "hello" => {
+            // Termlab 0.2.11+: whether it can share its screen, and whether that's on.
+            if let Ok(caps) = serde_json::from_value::<crate::screen::Caps>(msg["screen"].clone()) {
+                app.hub.screen.set_caps(machine, caps);
+            }
             let os = msg["os"].as_str().map(|s| clip(s, 100));
             let version = msg["version"].as_str().map(|s| clip(s, 40));
             let _ = app.db.with(|c| {
@@ -305,6 +309,22 @@ fn handle_machine(app: &AppRef, machine: i64, text: &str) {
                 "error": msg["error"].as_str().map(|s| clip(s, 500)),
             }));
         }
+        "screen.state" => {
+            if let Ok(caps) = serde_json::from_value::<crate::screen::Caps>(msg["screen"].clone()) {
+                app.hub.screen.set_caps(machine, caps);
+                refresh_machine(app, machine);
+            }
+        }
+        "screen.refused" => {
+            if let Some(sid) = msg["sid"].as_str() {
+                let error = msg["error"].as_str().map(|s| clip(s, 300));
+                app.hub.screen.refused(
+                    machine,
+                    sid,
+                    error.unwrap_or_else(|| "The computer didn't start screen sharing.".into()),
+                );
+            }
+        }
         "usage" => {
             let usage = sessions::set_usage(app, machine, &msg["usage"]);
             app.hub.broadcast(
@@ -344,7 +364,7 @@ fn refresh_machine(app: &AppRef, machine: i64) {
 // ---- browsers --------------------------------------------------------------------------
 
 /// Same-origin only: a page on another site can't open this websocket with our cookie.
-fn origin_allowed(app: &AppRef, headers: &HeaderMap) -> bool {
+pub(crate) fn origin_allowed(app: &AppRef, headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(ORIGIN).and_then(|v| v.to_str().ok()) else {
         return true; // Not a browser.
     };

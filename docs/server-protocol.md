@@ -55,6 +55,8 @@ type Machine = {
   sessions: number;
   running: number;          // running + needs_you
   notes_sync: boolean;      // its Termlab syncs project notes
+  // Screen sharing (Termlab 0.2.11+); null: its Termlab can't share its screen.
+  screen: { supported: boolean; enabled: boolean; active: number } | null;
 };
 
 type ProjectNotes = {
@@ -119,6 +121,7 @@ unless the public URL is plain http). Every request other than GET must send the
 | `POST /api/sessions/{id}/unhold` | 202 / 409 |
 | `POST /api/machines/{id}/sessions { request_id, folder_id, agent, permission, model?, message? }` | 202 / 422 (unknown project or agent) / 409 (offline). Audited. The result comes as `session.start_result`. `permission`: `ask_first`, `auto_edit` or `full_auto`. |
 | `POST /api/machines/{id}/projects/move { folder_id, before }` | 202 / 404 / 409. Puts the project before `before` (null: last), in Termlab's sidebar too. |
+| `POST /api/machines/{id}/screen { totp_code? }` | 202 `{ sid }`: a screen session (see "Screen sessions"). 428 `{message}` when an authenticator code is needed (none given in the last 10 minutes by this web session), 422 for a wrong code, 429 after 5 failures, 409 when the machine is offline, its Termlab can't share its screen, or sharing is off there. |
 
 Each of these is written to the audit log before the command goes to the machine.
 
@@ -200,6 +203,51 @@ Browser → server:
 - `{ "type": "resize", "id": "…", "cols": 100, "rows": 30 }`: give a watched session this view's
   size (20–500 × 5–300); `{ "type": "resize", "id": "…", "release": true }` hands it back.
 
+## Screen sessions
+
+Seeing and controlling a machine's screen (Termlab 0.2.11+, macOS). The machine's owner
+switches it on in Termlab (Settings › Remote access › Screen sharing); the server can't.
+
+1. The browser calls `POST /api/machines/{id}/screen` with a code from the authenticator app
+   (needed again 10 minutes after the last one). The server sends the machine
+   `screen.open` with a new session id (`sid`, 32 hex characters, valid for a minute).
+2. The machine starts `termlab-screen`, which connects to
+   `GET /api/machine/screen/ws?sid=…` (bearer token); the browser connects to
+   `GET /api/screen/ws?sid=…` (cookie, same origin). Whichever comes first waits up to 30 s
+   for the other. If the machine refuses, the browser gets `{ "type": "error", "message" }`
+   and the socket closes.
+3. The server relays the two sockets: everything from the machine (binary ≤ 8 MB, text), and
+   from the browser only text messages of the types below. It ends the session when either
+   side closes or stays silent for 60 s (pings every 20 s), when the web session signs out,
+   when the machine is removed, or when the machine switches sharing off. `screen.started`
+   and `screen.ended` go to the audit log (`screen.denied` for a wrong code).
+
+Machine → browser:
+- binary video frames: `[1, flags, seq: u32, timestamp_us: u64, H.264 AVCC data]`, big-endian;
+  `flags & 1`: key frame.
+- `{ "type": "hello", "displays": { id, name, width, height, scale, primary }[], "display": id, "quality": "balanced", "input": bool, "os", "version" }`.
+  `input` false: the computer won't take mouse and keyboard input (Accessibility not allowed).
+- `{ "type": "config", "codec": "avc1.4d0028", "description": "<base64 avcC>", "width", "height", "display" }`:
+  (re)configure the decoder; a key frame follows.
+- `{ "type": "status", "state": "confirming" }`: waiting for someone at the computer to allow it.
+- `{ "type": "display", "display": id }`, `{ "type": "quality", "quality": "low" | "balanced" | "high" }`
+- `{ "type": "clipboard", "text" }`, `{ "type": "clipboard.saved", "ok": bool }`
+- `{ "type": "error", "message" }`: why the session ends.
+
+Browser → machine:
+- `{ "type": "ack", "seq" }` for every decoded (or skipped) frame. The machine keeps at most
+  4 frames unacknowledged and skips captures meanwhile, so a slow link gets fewer frames, not
+  more delay.
+- `{ "type": "keyframe" }`: the decoder was reset; send a key frame.
+- `{ "type": "display", "id" }`, `{ "type": "quality", "quality" }`
+- `{ "type": "pointer", "x": 0..1, "y": 0..1, "action": "move" | "down" | "up", "button": 0 | 1 | 2, "clicks": n }`
+  (x and y across the shown display; buttons as `MouseEvent.button`).
+- `{ "type": "wheel", "dx", "dy" }` in pixels (positive y scrolls down).
+- `{ "type": "key", "code": "KeyA", "down": bool, "repeat": bool }` with `KeyboardEvent.code`.
+- `{ "type": "text", "text" }`: typed text (phone keyboards), up to 10,000 characters.
+- `{ "type": "release" }`: let go of every key and button held.
+- `{ "type": "clipboard.set", "text" }` (up to 1 MB), `{ "type": "clipboard.get" }`.
+
 ## Machine API (termlabd)
 
 ### Pairing
@@ -213,7 +261,9 @@ Browser → server:
 ### `GET /api/machine/ws` (websocket, bearer token)
 
 Machine → server:
-- `{ "type": "hello", "protocol": 2, "version": "0.2.7", "os": "macOS 15 · Apple Silicon" }` (first message)
+- `{ "type": "hello", "protocol": 2, "version": "0.2.7", "os": "macOS 15 · Apple Silicon", "screen": { "supported": bool, "enabled": bool } }` (first message; `screen` since 0.2.11)
+- `{ "type": "screen.state", "screen": { "supported": bool, "enabled": bool } }`: sharing was switched on or off.
+- `{ "type": "screen.refused", "sid": "…", "error": "…" }`: a screen session couldn't start.
 - `{ "type": "snapshot", "sessions": SessionView[] }`: replaces the machine's sessions.
   The fields `machine_id`, `machine`, `status_changed_at` and `updated_at` are filled in by
   the server and may be omitted.
@@ -239,6 +289,8 @@ Server → machine:
 - `{ "type": "project.move", "folder_id": 2, "before": 1 }`: reorder (`before` null: last).
 - `{ "type": "notes.save", "path": "…", "text": "…" }`: notes edited in the browser, for a
   project folder Termlab knows; it answers with `notes`.
+- `{ "type": "screen.open", "sid": "…", "viewer": "Safari on iPhone at 203.0.113.5" }`: start
+  `termlab-screen` for a screen session (if sharing is on), or answer `screen.refused`.
 - `{ "type": "bye", "reason": "…" }`: the token was revoked; forget it.
 
 A machine is online while its websocket is open (pings every 25 s). If it stays

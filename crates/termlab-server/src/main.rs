@@ -10,6 +10,7 @@ mod config;
 mod db;
 mod hub;
 mod notify;
+mod screen;
 mod sessions;
 mod util;
 mod web;
@@ -127,6 +128,7 @@ pub fn build_app(cfg: Config) -> anyhow::Result<AppRef> {
 pub fn router(app: AppRef) -> Router {
     api::routes()
         .merge(ws::routes())
+        .merge(screen::routes())
         .fallback(web::static_files)
         .layer(from_fn_with_state(app.clone(), auth::csrf_guard))
         .layer(RequestBodyLimitLayer::new(1 << 20))

@@ -254,6 +254,17 @@ export interface RemoteStatus {
   defaultMachineName: string;
 }
 
+export type ScreenStatus = {
+  supported: boolean;
+  enabled: boolean;
+  /** Ask on this computer before each session. */
+  confirm: boolean;
+  screenAllowed: boolean;
+  inputAllowed: boolean;
+  /** The session running now. */
+  active: { pid: number; startedAt: number; viewer: string } | null;
+};
+
 function call<T>(method: string, params?: unknown): Promise<T> {
   const request = params === undefined ? { method } : { method, params };
   return invoke<T>("daemon_call", { request });
@@ -269,6 +280,11 @@ export const api = {
   removeFolder: (id: number) => call<null>("removeFolder", { id }),
   /** A project's notes, by its folder's path. */
   readProjectNotes: (project: string) => invoke<ProjectNotes>("read_project_notes", { project }),
+  /** Remote screen sharing: the switch, macOS permissions and the session running now. */
+  screenStatus: () => invoke<ScreenStatus>("screen_status"),
+  screenSet: (enabled: boolean, confirm: boolean) => invoke<ScreenStatus>("screen_set", { enabled, confirm }),
+  screenRequestPermission: (kind: "screen" | "input") => invoke<null>("screen_request_permission", { kind }),
+  screenStop: () => invoke<null>("screen_stop"),
   /** Replaces a project's notes; blank text removes them. */
   saveProjectNotes: (project: string, text: string) =>
     invoke<ProjectNotes>("save_project_notes", { project, text }),

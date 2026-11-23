@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { Button } from '@/components/el/button';
+import { Button, ButtonLink } from '@/components/el/button';
 import { Dialog } from '@/components/el/dialog';
 import { Panel } from '@/components/el/panel';
 import { Pill } from '@/components/el/status';
@@ -77,9 +77,16 @@ export function MachinesSection() {
                                         </td>
                                         <td className="px-5 py-3.5 font-mono text-[13px] text-ink-soft">{m.version ?? '—'}</td>
                                         <td className="px-5 py-3.5 text-right">
-                                            <Button variant="outline" size="sm" onClick={() => setManaging(m)}>
-                                                Manage
-                                            </Button>
+                                            <span className="inline-flex gap-2">
+                                                {m.screen?.supported && m.online && (
+                                                    <ButtonLink variant="outline" size="sm" to={`/screen/${m.id}`} title={m.screen.enabled ? 'See and control its screen' : 'Screen sharing is off in its Termlab'}>
+                                                        Screen
+                                                    </ButtonLink>
+                                                )}
+                                                <Button variant="outline" size="sm" onClick={() => setManaging(m)}>
+                                                    Manage
+                                                </Button>
+                                            </span>
                                         </td>
                                     </tr>
                                 ))}
