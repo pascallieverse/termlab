@@ -20,16 +20,23 @@ export type ShortcutId =
   | "missionView"
   | "inspector"
   | "split"
+  | "splitDown"
+  | "closePane"
+  | "paneLeft"
+  | "paneRight"
+  | "paneUp"
+  | "paneDown"
   | "handOff";
 
 export interface ShortcutDef {
   id: ShortcutId;
   label: string;
-  group: "Anywhere" | "Selected session";
+  group: "Anywhere" | "Selected session" | "Panes";
   default: Combo;
 }
 
 const mod = (key: string, shift = false): Combo => ({ mod: true, alt: false, shift, key });
+const modAlt = (key: string): Combo => ({ mod: true, alt: true, shift: false, key });
 
 export const SHORTCUTS: ShortcutDef[] = [
   { id: "palette", label: "Search or run a command", group: "Anywhere", default: mod("k") },
@@ -38,8 +45,14 @@ export const SHORTCUTS: ShortcutDef[] = [
   { id: "focusView", label: "Focus view", group: "Anywhere", default: mod("1") },
   { id: "missionView", label: "Mission control", group: "Anywhere", default: mod("2") },
   { id: "inspector", label: "Show or hide the inspector", group: "Anywhere", default: mod("i") },
-  { id: "split", label: "Split with another session, or close the split", group: "Selected session", default: mod("d") },
   { id: "handOff", label: "Hand off to another agent", group: "Selected session", default: mod("h", true) },
+  { id: "split", label: "Open another session on the right", group: "Panes", default: mod("d") },
+  { id: "splitDown", label: "Open another session below", group: "Panes", default: mod("d", true) },
+  { id: "closePane", label: "Close the active pane", group: "Panes", default: mod("w", true) },
+  { id: "paneLeft", label: "Go to the pane on the left", group: "Panes", default: modAlt("ArrowLeft") },
+  { id: "paneRight", label: "Go to the pane on the right", group: "Panes", default: modAlt("ArrowRight") },
+  { id: "paneUp", label: "Go to the pane above", group: "Panes", default: modAlt("ArrowUp") },
+  { id: "paneDown", label: "Go to the pane below", group: "Panes", default: modAlt("ArrowDown") },
 ];
 
 export type Bindings = Record<ShortcutId, Combo | null>;

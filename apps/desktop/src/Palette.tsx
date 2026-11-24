@@ -65,10 +65,9 @@ export function Palette() {
           </span>
         ),
         run: (split) => {
-          if (split) {
-            if (store.selectedId && store.selectedId !== s.id) store.setSplit(s.id);
-            else store.select(s.id, { view: "focus" });
-          } else store.select(s.id, { view: "focus" });
+          // Already on screen: go to its pane rather than moving it.
+          if (split && store.selectedId && !store.paneIds.includes(s.id)) store.openInSplit(s.id);
+          else store.select(s.id, { view: "focus" });
         },
       });
     }
@@ -293,7 +292,7 @@ export function Palette() {
       <div className="palette-foot">
         <span>↑↓ move</span>
         <span>↵ open</span>
-        <span>{MOD_LABEL}↵ open in split</span>
+        <span>{MOD_LABEL}↵ open in a new pane</span>
         <span className="push">Type &gt; for commands, @ for folders</span>
       </div>
     </Dialog>

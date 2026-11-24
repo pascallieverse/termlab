@@ -8,42 +8,81 @@ import { useStore, type InspectorTab, type Tab } from "./store";
 import { Icon, Monogram, StatusPill } from "./ui";
 import { useDetails } from "./useDetails";
 import { shortcutHint } from "./shortcuts";
-import { LabelsButton } from "./Labels";
+import { beginSessionDrag } from "./sessionDrag";
+import { LabelsButton, SessionLabels } from "./Labels";
 
-/** The selected session: header with tabs, terminal (or diff/timeline), approval bar, composer. */
-export function SessionPane({ session: s }: { session: Session }) {
+/** Buttons and tabs in a pane's header keep their own clicks; the rest of it drags the pane. */
+const onControl = (target: EventTarget) => target instanceof Element && target.closest("button, [role='tablist']") !== null;
+
+/**
+ * One session: header with tabs, terminal (or diff/timeline), approval bar, composer.
+ * With several panes open (`multi`) the header is a single compact line that also drags the
+ * pane, and only the active pane shows the tabs and the inspector buttons.
+ */
+export function SessionPane({ session: s, active = true, multi = false }: { session: Session; active?: boolean; multi?: boolean }) {
   const store = useStore();
   const folder = store.folderOf(s);
   const details = useDetails(s.id, s.status);
   const agent = AGENTS[s.agent];
   // From the agent itself, not the session's details: those load a moment after switching.
   const canResume = store.agents?.find((a) => a.agent === s.agent)?.canResume ?? false;
+  const tab = store.tabOf(s.id);
+  const tint = sessionColor(s.color);
 
   return (
-    <section className="session-pane" aria-label={s.title}>
-      <div className={`session-head${sessionColor(s.color).className}`} style={sessionColor(s.color).style}>
-        <Monogram agent={s.agent} size={38} />
+    <section
+      className={`session-pane${multi ? " in-split" : ""}${multi && active ? " is-active" : ""}`}
+      aria-label={s.title}
+      aria-current={multi && active ? "true" : undefined}
+      // Pressing anywhere in a pane makes it the active one.
+      onPointerDownCapture={multi && !active ? () => store.focusPane(s.id) : undefined}
+    >
+      <div
+        className={`session-head${multi ? " compact" : ""}${tint.className}`}
+        style={tint.style}
+        onPointerDown={multi ? (e) => !onControl(e.target) && beginSessionDrag(e, s) : undefined}
+        // A press on the header leaves the keyboard in the pane's terminal.
+        onMouseDown={multi ? (e) => !onControl(e.target) && e.preventDefault() : undefined}
+      >
+        <Monogram agent={s.agent} size={multi ? 26 : 38} />
         <div className="session-title">
           <TruncatedText as="h1" text={s.title} />
-          <div className="session-meta">
-            <span>{agent.name}</span>
-            <span aria-hidden="true">·</span>
-            <span className="mono">{s.model ?? details?.usage?.model ?? "default model"}</span>
-            {details?.branch && (
-              <>
-                <span aria-hidden="true">·</span>
-                <span className="mono">⎇ {details.branch}</span>
-              </>
-            )}
-            <LabelsButton sessionId={s.id} />
-          </div>
+          {!multi && (
+            <div className="session-meta">
+              <span>{agent.name}</span>
+              <span aria-hidden="true">·</span>
+              <span className="mono">{s.model ?? details?.usage?.model ?? "default model"}</span>
+              {details?.branch && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="mono">⎇ {details.branch}</span>
+                </>
+              )}
+              <LabelsButton sessionId={s.id} />
+            </div>
+          )}
         </div>
-        <StatusPill session={s} />
+        {multi && <SessionLabels sessionId={s.id} dots />}
+        <StatusPill session={s} compact={multi} />
         <div className="spacer" />
-        {s.live && s.updateReady && !!s.agentSessionId && canResume && <UpdateButton session={s} />}
-        <Tabs current={store.tab} onChange={store.setTab} />
-        <InspectorButton tab="notes" label="project notes" icon="note" />
-        <InspectorButton tab="session" label="session details" icon="panel" />
+        {active && (
+          <>
+            {s.live && s.updateReady && !!s.agentSessionId && canResume && <UpdateButton session={s} />}
+            <Tabs current={tab} onChange={(t) => store.setTabFor(s.id, t)} />
+            <InspectorButton tab="notes" label="project notes" icon="note" />
+            <InspectorButton tab="session" label="session details" icon="panel" />
+          </>
+        )}
+        {multi && (
+          <button
+            className="icon-btn"
+            aria-label={`Close pane: ${s.title}`}
+            title={`Close pane${active ? shortcutHint("closePane") : ""}`}
+            onClick={() => store.closePane(s.id)}
+          >
+            <Icon name="close" />
+          </button>
+        )}
       </div>
 
       {s.onHold && (
@@ -63,14 +102,20 @@ export function SessionPane({ session: s }: { session: Session }) {
 
       {store.restarting.has(s.id) && <div className="banner muted" role="status">Restarting session…</div>}
       <div className="session-body">
-        {store.tab === "terminal" &&
+        {tab === "terminal" &&
           (s.origin === "imported" && !s.live && s.exitCode === null ? (
             <ImportedPanel session={s} canResume={details?.canResume ?? false} />
           ) : (
-            <TerminalView key={`${s.id}:${s.live}:${store.terminalEpochs[s.id] ?? 0}`} sessionId={s.id} agent={s.agent} live={s.live} />
+            <TerminalView
+              key={`${s.id}:${s.live}:${store.terminalEpochs[s.id] ?? 0}`}
+              sessionId={s.id}
+              agent={s.agent}
+              live={s.live}
+              autoFocus={active}
+            />
           ))}
-        {store.tab === "diff" && <DiffView sessionId={s.id} status={s.status} />}
-        {store.tab === "timeline" && <TimelineView sessionId={s.id} status={s.status} />}
+        {tab === "diff" && <DiffView sessionId={s.id} status={s.status} />}
+        {tab === "timeline" && <TimelineView sessionId={s.id} status={s.status} />}
       </div>
 
       {s.live && s.status === "needs_you" && <ApprovalBar session={s} />}
@@ -87,7 +132,7 @@ function InspectorButton({ tab, label, icon }: { tab: InspectorTab; label: strin
   const on = store.inspectorOpen && store.inspectorTab === tab;
   return (
     <button
-      className={`icon-btn${on ? " on" : ""}`}
+      className={`icon-btn head-extra${on ? " on" : ""}`}
       aria-label={label[0].toUpperCase() + label.slice(1)}
       aria-pressed={on}
       title={`${on ? "Hide" : "Show"} ${label}${tab === "session" ? shortcutHint("inspector") : ""}`}
@@ -150,7 +195,7 @@ function ImportedPanel({ session: s, canResume }: { session: Session; canResume:
             <Icon name="refresh" /> Resume here
           </button>
         )}
-        <button className="btn tall" onClick={() => store.setTab("timeline")}>
+        <button className="btn tall" onClick={() => store.setTabFor(s.id, "timeline")}>
           Open timeline
         </button>
       </div>

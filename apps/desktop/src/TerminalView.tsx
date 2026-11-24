@@ -59,17 +59,18 @@ export function TerminalView({
   sessionId,
   agent,
   live,
-  compact = false,
   autoFocus = true,
 }: {
   sessionId: string;
   agent: AgentId;
   live: boolean;
-  /** One point smaller than the chosen font size (the split pane). */
-  compact?: boolean;
+  /** Whether the terminal takes the keyboard when it opens (the active pane's does). */
   autoFocus?: boolean;
 }) {
   const host = useRef<HTMLDivElement>(null);
+  // Read when the terminal opens: a pane becoming active must not reopen its terminal.
+  const autoFocusRef = useRef(autoFocus);
+  autoFocusRef.current = autoFocus;
   const liveRef = useRef(live);
   liveRef.current = live;
   const agentRef = useRef(agent);
@@ -81,7 +82,7 @@ export function TerminalView({
     let disposed = false;
     let cleanup = () => {};
     const prefs = getPrefs();
-    const sizeFor = (p: typeof prefs) => Math.max(8, p.terminalFontSize - (compact ? 1 : 0));
+    const sizeFor = (p: typeof prefs) => Math.max(8, p.terminalFontSize);
     const fontSize = sizeFor(prefs);
 
     // xterm measures cell size when it opens, so the font must be loaded first.
@@ -297,7 +298,7 @@ export function TerminalView({
         });
       });
       ro.observe(el);
-      if (autoFocus) term.focus();
+      if (autoFocusRef.current) term.focus();
 
       cleanup = () => {
         ro.disconnect();
@@ -318,7 +319,7 @@ export function TerminalView({
       disposed = true;
       cleanup();
     };
-  }, [sessionId, compact, autoFocus]);
+  }, [sessionId]);
 
   // xterm's fit measures its parent's height including padding, so the padding lives on the
   // outer box and xterm gets an unpadded inner surface that's exactly the space it can use.

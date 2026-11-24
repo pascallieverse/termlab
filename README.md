@@ -73,7 +73,10 @@ Agents without hooks get their status from the terminal screen instead.
 - **Plain terminals** next to the agents: open your own shell in a project from New session
   or the command palette.
 - **Drop files on a terminal** to type their paths, as in Terminal.app and iTerm.
-- **Split view.** Two sessions next to each other.
+- **Split view.** Up to six sessions next to and above each other. Drag a session from the
+  sidebar onto the terminal: an edge opens it there, the middle replaces what's shown. Drag a
+  pane by its header to move it, and the lines between panes to resize. Each pane keeps its
+  own Terminal, Diff or Timeline tab, and the arrangement is remembered.
 - **Notifications** when a session needs you, finishes or fails.
 - **On hold.** Park a session so it stops counting towards attention badges and notifications,
   without stopping its process.

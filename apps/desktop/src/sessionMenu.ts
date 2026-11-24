@@ -5,6 +5,7 @@ import { AGENTS } from "./agents";
 import type { MenuItem } from "./ContextMenu";
 import type { useStore } from "./store";
 import { shortcutLabel } from "./shortcuts";
+import { MAX_PANES } from "./paneLayout";
 
 type Store = ReturnType<typeof useStore>;
 
@@ -14,18 +15,31 @@ export function sessionMenu(store: Store, s: Session): MenuItem[] {
   // A terminal reopens as a fresh shell.
   const canResume = !s.live && (s.agent === "shell" || (!!s.agentSessionId && !!info?.canResume));
   const canFork = !!s.agentSessionId && !!info?.canFork;
+  const onScreen = store.paneIds.includes(s.id);
+  const full = !onScreen && store.paneIds.length >= MAX_PANES;
+  const noSplit = !store.selectedId
+    ? "Open a session first"
+    : onScreen
+      ? store.paneIds.length > 1 ? "Already on screen: drag its header to move it" : "This is the session already open"
+      : full ? `${MAX_PANES} panes are open: close one first` : undefined;
   const items: MenuItem[] = [
     { label: "Open", onSelect: () => store.select(s.id, { view: "focus", tab: "terminal" }) },
     {
-      label: "Open in split",
-      shortcut: shortcutLabel("split") || undefined,
-      disabled: !store.selectedId || store.selectedId === s.id,
-      hint: store.selectedId === s.id ? "This is the session already open" : undefined,
-      onSelect: () => {
-        store.setView("focus");
-        store.setSplit(s.id);
-      },
+      label: "Open on the right",
+      disabled: !!noSplit,
+      hint: noSplit ?? "Or drag it onto the terminal",
+      onSelect: () => store.openInSplit(s.id, "right"),
     },
+    { label: "Open below", disabled: !!noSplit, onSelect: () => store.openInSplit(s.id, "bottom") },
+  ];
+  if (onScreen && store.paneIds.length > 1) {
+    items.push({
+      label: "Close pane",
+      shortcut: (store.selectedId === s.id && shortcutLabel("closePane")) || undefined,
+      onSelect: () => store.closePane(s.id),
+    });
+  }
+  items.push(
     { label: "Rename…", onSelect: () => store.setRenameFor(s.id) },
     { label: "Labels…", onSelect: () => store.setLabelsFor(s.id) },
     {
@@ -34,7 +48,7 @@ export function sessionMenu(store: Store, s: Session): MenuItem[] {
       onSelect: () => void store.setOnHold(s.id, !s.onHold),
     },
     "separator",
-  ];
+  );
   if (!s.live) {
     items.push({
       label: s.agent === "shell" ? "Reopen terminal" : "Resume here",

@@ -36,6 +36,22 @@ import { NO_LABELS, labelsBySession, withSessionLabels } from "./sessionLabels";
 import { AGENTS, STATUS, homeFrom } from "./agents";
 import { matchesSessionFilter, type SessionFilter } from "./sessionFilters";
 import { getPrefs, usePrefs } from "./prefs";
+import {
+  EMPTY_PANES,
+  MAX_PANES,
+  activate,
+  closePane,
+  hasLeaf,
+  leaves,
+  parsePanes,
+  place,
+  reconcile,
+  setRatio,
+  type DropTarget,
+  type Edge,
+  type Layout,
+  type Panes,
+} from "./paneLayout";
 
 export type View = "focus" | "mission";
 export type Tab = "terminal" | "diff" | "timeline";
@@ -71,10 +87,17 @@ interface Store {
   agents: AgentInfo[] | null;
   daemon: DaemonStatus;
   home: string | null;
+  /** The session in the active pane. */
   selectedId: string | null;
-  splitId: string | null;
+  /** The focus view's panes: one session, or several split side by side and above each other. */
+  layout: Layout | null;
+  /** The sessions on screen, left to right and top to bottom. */
+  paneIds: string[];
   view: View;
+  /** The active pane's tab. */
   tab: Tab;
+  /** Each pane keeps its own tab. */
+  tabOf(id: string): Tab;
   newSession: NewSessionOptions | null;
   paletteOpen: boolean;
   handOffFor: string | null;
@@ -111,9 +134,17 @@ interface Store {
    * selecting a session the list doesn't know falls back to another one.
    */
   show(session: Session, opts?: { view?: View; tab?: Tab }): void;
-  setSplit(id: string | null): void;
+  /** Opens a session in a new pane next to the active one, and makes it active. */
+  openInSplit(id: string, edge?: Edge): void;
+  /** Puts a session where it was dropped: at a pane's edge, or in its place. */
+  placePane(id: string, target: DropTarget): void;
+  closePane(id: string): void;
+  focusPane(id: string): void;
+  /** Moves the divider of one split (see `Divider.path`). */
+  resizePanes(path: string, ratio: number): void;
   setView(v: View): void;
   setTab(t: Tab): void;
+  setTabFor(id: string, t: Tab): void;
   openNewSession(o?: NewSessionOptions): void;
   closeNewSession(): void;
   setPaletteOpen(open: boolean): void;
@@ -141,6 +172,20 @@ interface Store {
 }
 
 const INSPECTOR_KEY = "termlab.inspector";
+const PANES_KEY = "termlab.panes";
+
+/** Sessions on hold are a list of their own, so they get panes of their own. */
+type PaneGroup = "main" | "held";
+
+/** The pane layout is a per-viewer convenience, kept in localStorage. */
+function loadPanes(): Record<PaneGroup, Panes> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PANES_KEY) ?? "null") as Record<string, unknown> | null;
+    return { main: parsePanes(raw?.main), held: parsePanes(raw?.held) };
+  } catch {
+    return { main: EMPTY_PANES, held: EMPTY_PANES };
+  }
+}
 const INSPECTOR_TAB_KEY = "termlab.inspector.tab";
 
 export type InspectorTab = "session" | "notes";
@@ -177,10 +222,32 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   );
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [daemon, setDaemon] = useState<DaemonStatus>({ connected: false, message: null });
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [splitId, setSplitId] = useState<string | null>(null);
+  // False until the first list of sessions arrives: a saved layout isn't judged against nothing.
+  const [loaded, setLoaded] = useState(false);
+  const [paneGroups, setPaneGroups] = useState(loadPanes);
+  const paneGroup: PaneGroup = sessionFilter === "on_hold" ? "held" : "main";
+  // What's on screen: the saved layout without sessions that are gone, and never empty while
+  // there is a session to show.
+  const fitSessions = useMemo(() => {
+    const ids = new Set(visibleSessions.map((s) => s.id));
+    const fallback = (visibleSessions.find((s) => s.live) ?? visibleSessions[0])?.id ?? null;
+    return (p: Panes) => reconcile(p, (id) => ids.has(id), fallback);
+  }, [visibleSessions]);
+  const savedPanes = paneGroups[paneGroup];
+  const panes = useMemo(() => (loaded ? fitSessions(savedPanes) : savedPanes), [savedPanes, fitSessions, loaded]);
+  const selectedId = panes.active;
+  const paneIds = useMemo(() => leaves(panes.layout), [panes.layout]);
+  const updatePanes = useCallback((group: PaneGroup, fn: (p: Panes) => Panes) => {
+    setPaneGroups((all) => {
+      const next = fn(all[group]);
+      return next === all[group] ? all : { ...all, [group]: next };
+    });
+  }, []);
   const [view, setView] = useState<View>("focus");
-  const [tab, setTab] = useState<Tab>("terminal");
+  const [tabs, setTabs] = useState<Record<string, Tab>>({});
+  const setTabFor = useCallback((id: string, t: Tab) => {
+    setTabs((all) => ((all[id] ?? "terminal") === t ? all : { ...all, [id]: t }));
+  }, []);
   const [newSession, setNewSession] = useState<NewSessionOptions | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [handOffFor, setHandOffFor] = useState<string | null>(null);
@@ -240,6 +307,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const [f, s] = await Promise.all([api.listFolders(), api.listSessions()]);
     setFolders(f);
     setSessions(sortSessions(s));
+    setLoaded(true);
     for (const x of s) prevStatus.current.set(x.id, x.status);
   }, []);
 
@@ -257,7 +325,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const prefs = getPrefs();
     if (needs ? !prefs.notifyNeedsYou : !prefs.notifyFinished) return;
     if (finished && focused.current) return;
-    if (needs && focused.current && document.visibilityState === "visible" && selectedRef.current === s.id) return;
+    if (needs && focused.current && document.visibilityState === "visible" && shownRef.current.includes(s.id)) return;
     let ok = await isPermissionGranted();
     if (!ok) ok = (await requestPermission()) === "granted";
     if (!ok) return;
@@ -270,8 +338,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     notifiedFocus.current = s.id;
   }, []);
 
-  const selectedRef = useRef<string | null>(null);
-  selectedRef.current = selectedId;
+  // The sessions you're looking at: every pane, not only the active one.
+  const shownRef = useRef<string[]>([]);
+  shownRef.current = paneIds;
 
   useEffect(() => {
     const unlisten = [
@@ -298,10 +367,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       getCurrentWindow().onFocusChanged(({ payload }) => {
         focused.current = payload;
         if (payload && notifiedFocus.current) {
-          setSelectedId(notifiedFocus.current);
+          const id = notifiedFocus.current;
+          updatePanes("main", (p) => activate(p, id));
           setSessionFilter("all");
           setView("focus");
-          setTab("terminal");
+          setTabFor(id, "terminal");
           notifiedFocus.current = null;
         }
       }),
@@ -316,7 +386,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
     });
     return () => unlisten.forEach((p) => p.then((f) => f()));
-  }, [reload, maybeNotify, toast]);
+  }, [reload, maybeNotify, updatePanes, setTabFor, toast]);
 
   // Dock badge: sessions waiting on you.
   const { dockBadge } = usePrefs();
@@ -327,13 +397,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       .catch(() => {});
   }, [needCount, dockBadge]);
 
-  // Keep a valid selection.
+  // Keep what's saved in step with what's shown, and remember it for the next launch. Fitted
+  // again on whatever is saved by then, not written from this render: a divider being dragged
+  // has usually moved on in the meantime.
   useEffect(() => {
-    if (!visibleSessions.some((s) => s.id === selectedId)) {
-      setSelectedId((visibleSessions.find((s) => s.live) ?? visibleSessions[0])?.id ?? null);
-    }
-    if (splitId && !visibleSessions.some((s) => s.id === splitId)) setSplitId(null);
-  }, [visibleSessions, selectedId, splitId]);
+    if (loaded && panes !== savedPanes) updatePanes(paneGroup, fitSessions);
+  }, [loaded, panes, savedPanes, paneGroup, fitSessions, updatePanes]);
+  useEffect(() => {
+    if (loaded) remember(PANES_KEY, JSON.stringify(paneGroups));
+  }, [paneGroups, loaded]);
 
   const addFolder = useCallback(
     async (path: string) => {
@@ -345,6 +417,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   );
 
   const home = useMemo(() => homeFrom(folders.map((f) => f.path)), [folders]);
+  const groupOf = (s: Session): PaneGroup => (s.onHold ? "held" : "main");
 
   const store: Store = {
     folders,
@@ -363,9 +436,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     daemon,
     home,
     selectedId,
-    splitId,
+    layout: panes.layout,
+    paneIds,
     view,
-    tab,
+    tab: (selectedId ? tabs[selectedId] : undefined) ?? "terminal",
+    tabOf: (id) => tabs[id] ?? "terminal",
     newSession,
     paletteOpen,
     handOffFor,
@@ -410,10 +485,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const session = sessions.find((s) => s.id === id);
       if (session?.onHold) setSessionFilter("on_hold");
       else if (session && sessionFilter === "on_hold") setSessionFilter("all");
-      setSelectedId(id);
-      if (id && id === splitId) setSplitId(null);
+      const group = session ? groupOf(session) : paneGroup;
+      updatePanes(group, (p) => activate(p, id));
       if (opts?.view) setView(opts.view);
-      if (opts?.tab) setTab(opts.tab);
+      if (!id) return;
+      // A session that takes over the active pane opens on the tab that pane was showing.
+      const replaces = group === paneGroup && selectedId && !paneIds.includes(id) ? selectedId : id;
+      setTabFor(id, opts?.tab ?? tabs[replaces] ?? "terminal");
     },
     show(session, opts) {
       if (session.onHold) setSessionFilter("on_hold");
@@ -421,16 +499,45 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // Only when it's missing: an update that already arrived is newer than this answer.
       setSessions((list) => (list.some((x) => x.id === session.id) ? list : sortSessions([session, ...list])));
       if (!prevStatus.current.has(session.id)) prevStatus.current.set(session.id, session.status);
-      setSelectedId(session.id);
-      if (session.id === splitId) setSplitId(null);
+      updatePanes(groupOf(session), (p) => activate(p, session.id));
       setView(opts?.view ?? "focus");
-      setTab(opts?.tab ?? "terminal");
+      setTabFor(session.id, opts?.tab ?? "terminal");
     },
-    setSplit(id) {
-      setSplitId(id && id !== selectedId ? id : null);
+    openInSplit(id, edge = "right") {
+      const session = sessions.find((s) => s.id === id);
+      if (!session) return;
+      setView("focus");
+      // From the other list (on hold, or back from it) there is no pane to split: just open it.
+      if (groupOf(session) !== paneGroup) return store.select(id);
+      if (!paneIds.includes(id) && paneIds.length >= MAX_PANES) {
+        toast(`${MAX_PANES} panes are open. Close one to add another.`, "info");
+        return;
+      }
+      updatePanes(paneGroup, (p) =>
+        p.active && p.active !== id ? place(p, id, { pane: p.active, zone: edge }, true) : activate(p, id),
+      );
+    },
+    placePane(id, target) {
+      updatePanes(paneGroup, (p) => place(p, id, target));
+    },
+    closePane(id) {
+      updatePanes(paneGroup, (p) => closePane(p, id));
+    },
+    focusPane(id) {
+      updatePanes(paneGroup, (p) => (hasLeaf(p.layout, id) ? activate(p, id) : p));
+    },
+    resizePanes(path, ratio) {
+      updatePanes(paneGroup, (p) => {
+        if (p.layout === null) return p;
+        const layout = setRatio(p.layout, path, ratio);
+        return layout === p.layout ? p : { ...p, layout };
+      });
     },
     setView,
-    setTab,
+    setTab(t) {
+      if (selectedId) setTabFor(selectedId, t);
+    },
+    setTabFor,
     openNewSession: (o) => setNewSession(o ?? {}),
     closeNewSession: () => setNewSession(null),
     setPaletteOpen,
@@ -477,10 +584,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           setSessions((list) => sortSessions([resumed, ...list.filter((s) => s.id !== id)]));
           // Force a fresh attachment even if React batches the stopped/running events.
           setTerminalEpochs((epochs) => ({ ...epochs, [id]: (epochs[id] ?? 0) + 1 }));
-          setSelectedId(id);
-          if (splitId === id) setSplitId(null);
+          updatePanes(groupOf(resumed), (p) => activate(p, id));
           setView("focus");
-          setTab("terminal");
+          setTabFor(id, "terminal");
           toast("Session restarted", "info");
         });
       } finally {

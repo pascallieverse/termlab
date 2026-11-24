@@ -8,16 +8,16 @@ import { Inspector } from "./Inspector";
 import { MissionControl } from "./MissionControl";
 import { NewSessionDialog } from "./NewSessionDialog";
 import { Palette } from "./Palette";
-import { SessionPane } from "./SessionPane";
+import { Panes, SessionDragGhost } from "./Panes";
+import { neighbour, type Edge } from "./paneLayout";
 import { Sidebar } from "./Sidebar";
 import { ConfirmDialog, RenameDialog, SubagentDialog } from "./SmallDialogs";
 import { LabelsDialog } from "./Labels";
 import { SettingsDialog } from "./SettingsDialog";
 import { UpdateBanner, startUpdateChecks } from "./updates";
 import { StoreProvider, useStore } from "./store";
-import { TerminalView } from "./TerminalView";
-import { Icon, Kbd, Logo, Monogram, StatusPill } from "./ui";
-import { shortcutForEvent } from "./keybindings";
+import { Icon, Kbd, Logo } from "./ui";
+import { shortcutForEvent, type ShortcutId } from "./keybindings";
 import { IS_MAC, getBindings, isRecordingShortcut, shortcutLabel, useBindings } from "./shortcuts";
 
 export function App() {
@@ -58,7 +58,6 @@ function RestartServiceButton() {
 function Shell() {
   const store = useStore();
   const selected = store.visibleSessions.find((s) => s.id === store.selectedId) ?? null;
-  const split = store.visibleSessions.find((s) => s.id === store.splitId) ?? null;
   useShortcuts();
   useEffect(startUpdateChecks, []);
 
@@ -81,14 +80,7 @@ function Shell() {
         ) : (
           <>
             <main className="main">
-              {selected ? (
-                <div className={`panes${split ? " split" : ""}`}>
-                  <SessionPane session={selected} />
-                  {split && <SplitPane id={split.id} />}
-                </div>
-              ) : (
-                <Empty />
-              )}
+              {selected ? <Panes /> : <Empty />}
             </main>
             {selected && store.inspectorOpen && <Inspector session={selected} />}
           </>
@@ -106,6 +98,7 @@ function Shell() {
       {store.settingsOpen && <SettingsDialog />}
       {store.confirmRequest && <ConfirmDialog />}
       <Toasts />
+      <SessionDragGhost />
     </div>
   );
 }
@@ -160,35 +153,6 @@ function Header() {
         <Icon name="settings" size={16} />
       </button>
     </header>
-  );
-}
-
-function SplitPane({ id }: { id: string }) {
-  const store = useStore();
-  const s = store.sessions.find((x) => x.id === id);
-  if (!s) return null;
-  return (
-    <section className="split-pane" aria-label={`Split: ${s.title}`}>
-      <div className="split-head">
-        <Monogram agent={s.agent} size={26} />
-        <button className="link-btn split-title" onClick={() => store.select(s.id)} title="Make this the main session">
-          {s.title}
-        </button>
-        <StatusPill session={s} compact />
-        <div className="spacer" />
-        <button className="icon-btn" aria-label="Close split" onClick={() => store.setSplit(null)}>
-          <Icon name="close" />
-        </button>
-      </div>
-      <TerminalView
-        key={`${s.id}:${s.live}:${store.terminalEpochs[s.id] ?? 0}`}
-        sessionId={s.id}
-        agent={s.agent}
-        live={s.live}
-        compact
-        autoFocus={false}
-      />
-    </section>
   );
 }
 
@@ -251,6 +215,9 @@ function Toasts() {
   );
 }
 
+/** Shortcuts that act on the panes, so only in the focus view with a session open. */
+const PANE_SHORTCUTS = new Set<ShortcutId>(["split", "splitDown", "closePane","paneLeft", "paneRight", "paneUp", "paneDown"]);
+
 function useShortcuts() {
   const store = useStore();
   useEffect(() => {
@@ -258,8 +225,25 @@ function useShortcuts() {
       if (e.repeat || e.isComposing || isRecordingShortcut()) return;
       const id = shortcutForEvent(e, getBindings(), IS_MAC);
       if (!id) return;
-      if ((id === "split" || id === "handOff") && !store.selectedId) return;
+      const active = store.selectedId;
+      const inPanes = store.view === "focus" && !!active && store.layout !== null;
+      if (id === "handOff" && !active) return;
+      // Nor behind a dialog, where the panes aren't what you're working in.
+      if (PANE_SHORTCUTS.has(id) && (!inPanes || document.querySelector('[role="dialog"]'))) return;
       e.preventDefault();
+      // Not to the terminal as well: off macOS these are Ctrl combinations it would act on.
+      e.stopPropagation();
+      // The session a new pane opens with: one that isn't on screen yet, running ones first.
+      const offScreen = () => {
+        const rest = store.visibleSessions.filter((s) => !store.paneIds.includes(s.id));
+        const next = rest.find((s) => s.live) ?? rest[0];
+        if (!next) store.toast("Every session is already on screen.", "info");
+        return next;
+      };
+      const move = (edge: Edge) => {
+        const to = store.layout && active ? neighbour(store.layout, active, edge) : null;
+        if (to) store.focusPane(to);
+      };
       switch (id) {
         case "palette":
           store.setPaletteOpen(!store.paletteOpen);
@@ -283,12 +267,25 @@ function useShortcuts() {
           store.setHandOffFor(store.selectedId);
           break;
         case "split":
-          if (store.splitId) store.setSplit(null);
-          else {
-            const other = store.visibleSessions.find((s) => s.id !== store.selectedId && s.live) ??
-              store.visibleSessions.find((s) => s.id !== store.selectedId);
-            if (other) store.setSplit(other.id);
-          }
+        case "splitDown": {
+          const next = offScreen();
+          if (next) store.openInSplit(next.id, id === "split" ? "right" : "bottom");
+          break;
+        }
+        case "closePane":
+          if (active && store.paneIds.length > 1) store.closePane(active);
+          break;
+        case "paneLeft":
+          move("left");
+          break;
+        case "paneRight":
+          move("right");
+          break;
+        case "paneUp":
+          move("top");
+          break;
+        case "paneDown":
+          move("bottom");
           break;
       }
     }

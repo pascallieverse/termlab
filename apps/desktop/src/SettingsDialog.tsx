@@ -346,7 +346,7 @@ function TerminalSection() {
   return (
     <>
       <TerminalPreview />
-      <Group title="Text" note="The split pane uses one point smaller.">
+      <Group title="Text">
         <Row title="Font size" labelId="st-font" desc="JetBrains Mono">
           <div className="stepper" role="group" aria-labelledby="st-font">
             <button

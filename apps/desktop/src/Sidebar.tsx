@@ -12,6 +12,7 @@ import { useStore } from "./store";
 import { matchesSessionFilter, type SessionFilter } from "./sessionFilters";
 import { Dot, Icon, Monogram, StatusText } from "./ui";
 import { shortcutHint } from "./shortcuts";
+import { beginSessionDrag } from "./sessionDrag";
 import { LabelChip, SessionLabels } from "./Labels";
 
 /** Folder groups show this many sessions until expanded. */
@@ -358,6 +359,8 @@ function SessionRow({ session: s, onMenu, onSubagentMenu }: {
 }) {
   const store = useStore();
   const selected = s.id === store.selectedId && store.view === "focus";
+  // In one of the other panes.
+  const shown = !selected && store.view === "focus" && store.paneIds.includes(s.id);
   const ref = useRef<HTMLButtonElement>(null);
   // Keep the selected session visible (e.g. when moving with PgUp / PgDn).
   useEffect(() => {
@@ -370,10 +373,12 @@ function SessionRow({ session: s, onMenu, onSubagentMenu }: {
     <>
     <button
       ref={ref}
-      className={`session-row${selected ? " is-selected" : ""}${tint.className}`}
+      className={`session-row${selected ? " is-selected" : ""}${shown ? " is-shown" : ""}${tint.className}`}
       style={tint.style}
       aria-current={selected ? "true" : undefined}
       aria-haspopup="menu"
+      // Dragged onto the panes, it opens next to (or in place of) what's there.
+      onPointerDown={store.view === "focus" ? (e) => beginSessionDrag(e, s) : undefined}
       onClick={() => {
         // The session's own row stands for its main conversation, next to its sub-agents'.
         store.select(s.id, { view: "focus" });
