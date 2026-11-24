@@ -23,9 +23,10 @@ use windows::Win32::Media::MediaFoundation::{
     MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
     MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES,
-    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264,
-    MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoTransferMatrix_BT709,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
+    MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12,
+    MFVideoInterlace_Progressive, MFVideoTransferMatrix_BT709,
     eAVEncCommonRateControlMode_LowDelayVBR, eAVEncH264VProfile_High,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
@@ -69,7 +70,12 @@ fn set_u32(t: &IMFMediaType, key: &windows::core::GUID, v: u32) -> windows::core
     unsafe { t.SetUINT32(key, v) }
 }
 
-fn set_pair(t: &IMFMediaType, key: &windows::core::GUID, hi: u32, lo: u32) -> windows::core::Result<()> {
+fn set_pair(
+    t: &IMFMediaType,
+    key: &windows::core::GUID,
+    hi: u32,
+    lo: u32,
+) -> windows::core::Result<()> {
     // SAFETY: as above; sizes and rates are packed as (hi << 32) | lo.
     unsafe { t.SetUINT64(key, (u64::from(hi) << 32) | u64::from(lo)) }
 }
@@ -79,8 +85,7 @@ fn friendly_name(a: &IMFActivate) -> String {
     let mut len = 0u32;
     // SAFETY: GetAllocatedString hands out a CoTaskMem string, freed here.
     unsafe {
-        if a
-            .GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut p, &mut len)
+        if a.GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut p, &mut len)
             .is_ok()
         {
             let s = p.to_string().unwrap_or_default();
@@ -191,10 +196,22 @@ impl Mft {
             set_pair(&out, &MF_MT_FRAME_SIZE, w, h)?;
             set_pair(&out, &MF_MT_FRAME_RATE, fps, 1)?;
             set_pair(&out, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
-            set_u32(&out, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+            set_u32(
+                &out,
+                &MF_MT_INTERLACE_MODE,
+                MFVideoInterlace_Progressive.0 as u32,
+            )?;
             set_u32(&out, &MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32)?;
-            let _ = set_u32(&out, &MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32);
-            let _ = set_u32(&out, &MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32);
+            let _ = set_u32(
+                &out,
+                &MF_MT_YUV_MATRIX,
+                MFVideoTransferMatrix_BT709.0 as u32,
+            );
+            let _ = set_u32(
+                &out,
+                &MF_MT_VIDEO_NOMINAL_RANGE,
+                MFNominalRange_16_235.0 as u32,
+            );
             transform.SetOutputType(0, &out, 0).context("output type")?;
 
             let input = MFCreateMediaType()?;
@@ -203,7 +220,11 @@ impl Mft {
             set_pair(&input, &MF_MT_FRAME_SIZE, w, h)?;
             set_pair(&input, &MF_MT_FRAME_RATE, fps, 1)?;
             set_pair(&input, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
-            set_u32(&input, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+            set_u32(
+                &input,
+                &MF_MT_INTERLACE_MODE,
+                MFVideoInterlace_Progressive.0 as u32,
+            )?;
             transform.SetInputType(0, &input, 0).context("input type")?;
 
             let info = transform.GetOutputStreamInfo(0)?;

@@ -74,9 +74,12 @@ pub fn start(
             codec: crate::proto::Codec::H264,
             ..enc
         };
-        return Ok(Box::new(super::soft::Stream::start(enc, out, super::soft::no_hardware, || {
-            Ok(super::soft::test_pattern())
-        })?));
+        return Ok(Box::new(super::soft::Stream::start(
+            enc,
+            out,
+            super::soft::no_hardware,
+            || Ok(super::soft::test_pattern()),
+        )?));
     }
     Ok(Box::new(Stream::start(display, enc, out)?))
 }

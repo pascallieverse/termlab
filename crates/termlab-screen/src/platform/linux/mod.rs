@@ -95,11 +95,16 @@ pub fn start(
 ) -> anyhow::Result<Box<dyn Video>> {
     let kind = session();
     let draw_cursor = enc.draw_cursor;
-    Ok(Box::new(Stream::start(enc, out, hardware::encoder, move || match kind {
-        Session::X11 => x11::open(display, draw_cursor),
-        Session::Wayland => wayland::open(display),
-        Session::None => bail!(NO_SESSION),
-    })?))
+    Ok(Box::new(Stream::start(
+        enc,
+        out,
+        hardware::encoder,
+        move || match kind {
+            Session::X11 => x11::open(display, draw_cursor),
+            Session::Wayland => wayland::open(display),
+            Session::None => bail!(NO_SESSION),
+        },
+    )?))
 }
 
 pub enum Input {

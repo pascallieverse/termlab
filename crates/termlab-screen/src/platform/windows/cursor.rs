@@ -107,8 +107,12 @@ fn picture(cursor: HCURSOR) -> Option<(u32, u32, u32, u32, Vec<u8>)> {
     let mut ii = ICONINFO::default();
     // SAFETY: a valid cursor handle; the bitmaps it hands out are deleted below.
     unsafe { GetIconInfo(cursor.into(), &mut ii) }.ok()?;
-    let mask = (!ii.hbmMask.is_invalid()).then(|| pixels(ii.hbmMask)).flatten();
-    let color = (!ii.hbmColor.is_invalid()).then(|| pixels(ii.hbmColor)).flatten();
+    let mask = (!ii.hbmMask.is_invalid())
+        .then(|| pixels(ii.hbmMask))
+        .flatten();
+    let color = (!ii.hbmColor.is_invalid())
+        .then(|| pixels(ii.hbmColor))
+        .flatten();
     // SAFETY: GetIconInfo's copies, ours to delete.
     unsafe {
         if !ii.hbmMask.is_invalid() {

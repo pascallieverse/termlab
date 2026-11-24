@@ -493,6 +493,10 @@ mod tests {
         assert!(!Quality::Balanced.encoding(b).chroma444);
         // 4:4:4 only up to 4K here, so Native (wider) stays 4:2:0.
         assert!(!Quality::Native.encoding(b).chroma444);
-        assert!(!Quality::High.encoding(Browser { hevc444: 0, ..b }).chroma444);
+        assert!(
+            !Quality::High
+                .encoding(Browser { hevc444: 0, ..b })
+                .chroma444
+        );
     }
 }

@@ -222,7 +222,12 @@ impl Pointer for XPointer {
         if self.last.as_ref().map(|l| l.0) != Some(c.cursor_serial) {
             let mut rgba = Vec::with_capacity(c.cursor_image.len() * 4);
             for p in &c.cursor_image {
-                rgba.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8, (p >> 24) as u8]);
+                rgba.extend_from_slice(&[
+                    (p >> 16) as u8,
+                    (p >> 8) as u8,
+                    *p as u8,
+                    (p >> 24) as u8,
+                ]);
             }
             super::super::cursor::unpremultiply(&mut rgba);
             let shape = self.shapes.intern(
