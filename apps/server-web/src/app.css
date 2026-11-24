@@ -352,6 +352,32 @@
         image-rendering: auto;
         -webkit-touch-callout: none;
     }
+    .screen-viewer {
+        overscroll-behavior: none;
+        touch-action: manipulation;
+        -webkit-touch-callout: none;
+    }
+    .icon-btn.on {
+        border-color: var(--color-outline-strong);
+        background: var(--color-active);
+        color: var(--color-ink);
+    }
+    /* Fingers: bigger targets in the bar and the sheet. */
+    @media (pointer: coarse) {
+        .screen-bar .hchip {
+            padding: 8px 12px;
+        }
+        .screen-bar .icon-btn {
+            width: 40px;
+            height: 40px;
+        }
+        .screen-sheet .menu-item {
+            padding: 12px 10px;
+        }
+        .screen-sheet .segmented button {
+            min-height: 38px;
+        }
+    }
     button.hchip:hover {
         border-color: var(--color-outline-strong);
     }
@@ -1715,15 +1741,15 @@
     display: flex;
     align-items: flex-start;
     justify-content: center;
-    padding: 6vh 16px 16px;
+    padding: 4vh 16px 16px;
     background: rgba(4, 5, 6, 0.66);
     color: var(--color-ink);
     font-size: 14px;
     line-height: 1.5;
 }
 .settings-dialog {
-    width: min(900px, 100%);
-    height: min(660px, 88vh);
+    width: min(1160px, 100%);
+    height: min(860px, 92vh);
     display: flex;
     flex-direction: column;
     overflow: hidden;

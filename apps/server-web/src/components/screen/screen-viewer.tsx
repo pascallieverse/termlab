@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/el/button';
 import { Dialog } from '@/components/el/dialog';
@@ -14,6 +14,9 @@ import { ScreenClient, webCodecsAvailable, type CursorShape, type Quality, type 
 type Phase = { kind: 'starting' } | { kind: 'code'; error: string | null } | { kind: 'session'; sid: string } | { kind: 'failed'; message: string };
 type Fit = 'fit' | 'actual';
 type TouchMode = 'trackpad' | 'touch';
+type Pt = { x: number; y: number };
+type Size = { w: number; h: number };
+type ZoomPan = { zoom: number; pan: Pt };
 
 const KEYBAR: { label: string; code: string; title: string }[] = [
     { label: 'Esc', code: 'Escape', title: 'Escape' },
@@ -24,13 +27,53 @@ const KEYBAR: { label: string; code: string; title: string }[] = [
     { label: '→', code: 'ArrowRight', title: 'Right' },
     { label: '⌫', code: 'Backspace', title: 'Delete' },
     { label: '⏎', code: 'Enter', title: 'Return' },
+    { label: '⌦', code: 'Delete', title: 'Forward delete' },
+    { label: 'Home', code: 'Home', title: 'Home' },
+    { label: 'End', code: 'End', title: 'End' },
+    { label: 'PgUp', code: 'PageUp', title: 'Page up' },
+    { label: 'PgDn', code: 'PageDown', title: 'Page down' },
+    ...Array.from({ length: 12 }, (_, i) => ({ label: `F${i + 1}`, code: `F${i + 1}`, title: `F${i + 1}` })),
 ];
+
+const QUALITIES: { value: Quality; label: string; short: string }[] = [
+    { value: 'low', label: 'Low (data saver)', short: 'Low' },
+    { value: 'balanced', label: 'Balanced', short: 'Balanced' },
+    { value: 'high', label: 'Sharp (4K)', short: 'Sharp' },
+    { value: 'native', label: 'Native', short: 'Native' },
+];
+
+const GESTURES: Record<TouchMode, [string, string][]> = {
+    trackpad: [
+        ['Move a finger', 'move the pointer'],
+        ['Tap', 'click (tap twice: double-click)'],
+        ['Tap with two fingers', 'right-click'],
+        ['Hold, then move', 'drag'],
+        ['Two fingers', 'scroll'],
+        ['Pinch', 'zoom in on the picture'],
+    ],
+    touch: [
+        ['Tap', 'click there (tap twice: double-click)'],
+        ['Hold and let go', 'right-click'],
+        ['Hold, then move', 'drag'],
+        ['Swipe', 'scroll'],
+        ['Pinch', 'zoom in on the picture'],
+        ['Two fingers', 'move around while zoomed in'],
+    ],
+};
 
 /** Keep this much text in the hidden phone-keyboard field, so Backspace has something to delete. */
 const KB_PAD = '  ';
 
 /** Browsers don't show cursor images larger than this (CSS pixels). */
 const MAX_CSS_CURSOR = 128;
+
+/** Touches: how long a press is a hold, how far a finger goes before it's a move, how far one can zoom. */
+const HOLD_MS = 450;
+const SLOP = 8;
+const MAX_ZOOM = 6;
+
+/** Phones, and windows too small for every control in the bar: the rest go in a sheet. */
+const COMPACT = '(max-width: 959px), (max-height: 520px)';
 
 /**
  * The computer's pointer picture as a CSS cursor, `w`×`h` CSS pixels: candidates from best
@@ -61,6 +104,77 @@ function cssCursor(shape: CursorShape, w: number, h: number): string[] {
 }
 
 /**
+ * Where a `video`-sized picture goes in `area`: fitted, then zoomed and moved by `pan` (from the
+ * centre). The pan comes back limited, so the picture never leaves a gap it could fill.
+ */
+function place(video: Size, area: Size, zoom: number, pan: Pt) {
+    const s = Math.min(area.w / video.w, area.h / video.h) * zoom;
+    const w = video.w * s;
+    const h = video.h * s;
+    const limit = (size: number, room: number, p: number) => (size <= room ? 0 : Math.max(-(size - room) / 2, Math.min((size - room) / 2, p)));
+    const x = limit(w, area.w, pan.x);
+    const y = limit(h, area.h, pan.y);
+
+    return { w, h, left: (area.w - w) / 2 + x, top: (area.h - h) / 2 + y, pan: { x, y } };
+}
+
+const clamp01 = (p: Pt): Pt => ({ x: Math.min(1, Math.max(0, p.x)), y: Math.min(1, Math.max(0, p.y)) });
+const onPicture = (p: Pt) => p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1;
+/** Controls take their own touches (the picture's gestures leave them alone). */
+const isControl = (t: EventTarget | null) => t instanceof Element && t.closest('button, a, input, select, textarea, [data-control]') !== null;
+
+/** A media query's answer, kept current. */
+function useMedia(query: string): boolean {
+    const subscribe = useCallback(
+        (changed: () => void) => {
+            const m = window.matchMedia(query);
+            m.addEventListener('change', changed);
+
+            return () => m.removeEventListener('change', changed);
+        },
+        [query],
+    );
+
+    return useSyncExternalStore(
+        subscribe,
+        () => window.matchMedia(query).matches,
+        () => false,
+    );
+}
+
+/**
+ * The part of the page in view while a phone's keyboard is up (null when it isn't). The viewer
+ * shrinks to it, so the key bar sits on the keyboard instead of behind it.
+ */
+function useKeyboardViewport(): { top: number; height: number } | null {
+    const [vp, setVp] = useState<{ top: number; height: number } | null>(null);
+    useEffect(() => {
+        const vv = window.visualViewport;
+        if (!vv) return;
+        const on = () => {
+            // Pinch-zooming the page shrinks the visual viewport too; that's not a keyboard.
+            const up = vv.scale < 1.05 && document.documentElement.clientHeight - vv.height > 120;
+            setVp((old) => {
+                if (!up) return null;
+                if (old && old.top === vv.offsetTop && old.height === vv.height) return old;
+
+                return { top: vv.offsetTop, height: vv.height };
+            });
+        };
+        on();
+        vv.addEventListener('resize', on);
+        vv.addEventListener('scroll', on);
+
+        return () => {
+            vv.removeEventListener('resize', on);
+            vv.removeEventListener('scroll', on);
+        };
+    }, []);
+
+    return vp;
+}
+
+/**
  * Seeing and controlling a computer's screen. Opens over everything (the sessions keep
  * streaming behind it). Asks for an authenticator code first, unless one was given recently.
  */
@@ -72,6 +186,7 @@ export function ScreenViewer({ machineId }: { machineId: number }) {
     const [phase, setPhase] = useState<Phase>({ kind: 'starting' });
     const [code, setCode] = useState('');
     const [busy, setBusy] = useState(false);
+    const keyboard = useKeyboardViewport();
     const close = useCallback(() => navigate('/remote'), [navigate]);
 
     const begin = useCallback(
@@ -114,9 +229,15 @@ export function ScreenViewer({ machineId }: { machineId: number }) {
     const name = machine?.name ?? 'Computer';
 
     return (
-        <div className="screen-viewer fixed inset-0 z-[60] flex flex-col bg-black text-sm text-ink" role="dialog" aria-modal="true" aria-label={`Screen of ${name}`}>
+        <div
+            className="screen-viewer fixed inset-0 z-[60] flex flex-col bg-black pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)] text-sm text-ink"
+            style={keyboard ? { top: keyboard.top, height: keyboard.height, bottom: 'auto' } : undefined}
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Screen of ${name}`}
+        >
             {phase.kind === 'session' ? (
-                <Session key={phase.sid} sid={phase.sid} name={name} onClose={close} onRestart={() => void begin()} toast={toast} />
+                <Session key={phase.sid} sid={phase.sid} name={name} onClose={close} onRestart={() => void begin()} toast={toast} keyboardUp={keyboard !== null} />
             ) : (
                 <>
                     <Bar name={name} onClose={close} />
@@ -186,7 +307,7 @@ function Bar({ name, onClose, children }: { name: string; onClose: () => void; c
             <button type="button" className="icon-btn" onClick={onClose} aria-label="End and close" title="End and close">
                 <Icon name="close" size={16} />
             </button>
-            <span className="flex min-w-0 shrink-0 items-center gap-1.5 font-medium">
+            <span className="flex min-w-0 shrink items-center gap-1.5 font-medium">
                 <Icon name="screen" size={16} />
                 <span className="max-w-[160px] truncate">{name}</span>
             </span>
@@ -195,9 +316,50 @@ function Bar({ name, onClose, children }: { name: string; onClose: () => void; c
     );
 }
 
+/** Small line icons for the viewer's own buttons. */
+function Glyph({ name }: { name: 'keyboard' | 'more' | 'expand' | 'shrink' | 'bars' }) {
+    const d = {
+        keyboard: 'M3 6h18v12H3zM7 10h.01M11 10h.01M15 10h.01M7 14h10',
+        more: 'M5 12h.01M12 12h.01M19 12h.01',
+        expand: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
+        shrink: 'M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5',
+        bars: 'M4 7h16M4 12h16M4 17h16',
+    }[name];
+
+    return (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={name === 'more' ? 3 : 2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d={d} />
+        </svg>
+    );
+}
+
 type Toast = ReturnType<typeof useToast>;
 
-function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: string; onClose: () => void; onRestart: () => void; toast: Toast }) {
+type Touch = { x: number; y: number; sx: number; sy: number; t: number };
+type Gesture = {
+    /** The first finger: it alone moves the pointer and drags. */
+    primary: number;
+    /** The most fingers down at once. */
+    fingers: number;
+    moved: boolean;
+    /** Pressed without moving long enough. */
+    held: boolean;
+    dragging: boolean;
+    hold: number;
+    started: number;
+    /** Touch mode: the first finger landed on the picture (not the black around it). */
+    onPicture: boolean;
+    /** Two fingers: zoom and move the picture here, or scroll the computer. */
+    two: 'undecided' | 'view' | 'scroll';
+    dist0: number;
+    mid0: Pt;
+    /** Where the fingers were when the picture last moved (it moves once a frame). */
+    last: { m: Pt; d: number } | null;
+    /** Recent scrolling (computer pixels), for a fling when the fingers let go. */
+    samples: { t: number; dx: number; dy: number }[];
+};
+
+function Session({ sid, name, onClose, onRestart, toast, keyboardUp }: { sid: string; name: string; onClose: () => void; onRestart: () => void; toast: Toast; keyboardUp: boolean }) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const areaRef = useRef<HTMLDivElement>(null);
     const rootRef = useRef<HTMLDivElement>(null);
@@ -207,22 +369,27 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
     const [hello, setHello] = useState<ScreenHello | null>(null);
     const [display, setDisplay] = useState<number | null>(null);
     const [quality, setQuality] = useState<Quality>('balanced');
-    const [video, setVideo] = useState<{ w: number; h: number } | null>(null);
-    const [area, setArea] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+    const [video, setVideo] = useState<Size | null>(null);
+    const [area, setArea] = useState<Size>({ w: 0, h: 0 });
     const [stats, setStats] = useState<ScreenStats | null>(null);
     const [fit, setFit] = useState<Fit>('fit');
-    const [zoom, setZoom] = useState(1);
-    const [pan, setPan] = useState({ x: 0, y: 0 });
+    const [view, setViewState] = useState<ZoomPan>({ zoom: 1, pan: { x: 0, y: 0 } });
     const touchDevice = useMemo(() => matchMedia('(pointer: coarse)').matches, []);
+    const compact = useMedia(COMPACT);
     const [touchMode, setTouchMode] = useState<TouchMode>('trackpad');
     const [swap, setSwap] = useState(false);
     const [latched, setLatched] = useState<string[]>([]);
     const [keyboardOpen, setKeyboardOpen] = useState(false);
     const [menu, setMenu] = useState<'keys' | 'clipboard' | null>(null);
+    const [sheet, setSheet] = useState(false);
+    /** The bars are shown (on a phone they can be put away for a bigger picture). */
+    const [chrome, setChrome] = useState(true);
     const [clipText, setClipText] = useState<{ mode: 'from' | 'to'; text: string } | null>(null);
     const [fullscreen, setFullscreen] = useState(false);
+    const canFullscreen = useMemo(() => document.fullscreenEnabled === true, []);
     const canControl = hello?.input ?? false;
     const live = state.state === 'live';
+    const zoomed = view.zoom > 1.01;
     const overlayRef = useRef<HTMLCanvasElement>(null);
     /** The computer's pointer, as last heard (positions from here while a finger moves it). */
     const remote = useRef<RemoteCursor | null>(null);
@@ -230,12 +397,15 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
     const hovering = useRef(false);
     const localUntil = useRef(0);
     const cursorCache = useRef(new Map<string, string[]>());
-    const view = useRef<{ layout: { w: number; h: number; left: number; top: number } | null; pointsWide: number; control: boolean; live: boolean }>({
+    const paint = useRef<{ layout: { w: number; h: number; left: number; top: number } | null; pointsWide: number; control: boolean; live: boolean }>({
         layout: null,
         pointsWide: 0,
         control: false,
         live: false,
     });
+    /** Sizes and zoom as the gesture handlers need them now (between renders too). */
+    const geo = useRef<{ video: Size | null; area: Size }>({ video: null, area: { w: 0, h: 0 } });
+    const viewRef = useRef<ZoomPan>(view);
 
     // The session itself.
     useEffect(() => {
@@ -297,13 +467,56 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
         if (fit === 'actual') {
             return { w: video.w, h: video.h, left: 0, top: 0 };
         }
-        const s = Math.min(area.w / video.w, area.h / video.h) * zoom;
-        const w = video.w * s;
-        const h = video.h * s;
-        const clamp = (offset: number, size: number, room: number) => (size <= room ? (room - size) / 2 : Math.min(0, Math.max(room - size, offset)));
 
-        return { w, h, left: clamp((area.w - w) / 2 + pan.x, w, area.w), top: clamp((area.h - h) / 2 + pan.y, h, area.h) };
-    }, [video, area, fit, zoom, pan]);
+        return place(video, area, view.zoom, view.pan);
+    }, [video, area, fit, view]);
+
+    useLayoutEffect(() => {
+        geo.current = { video, area };
+    }, [video, area]);
+
+    /** Zooms (1–6×) and moves the picture, kept where it fills what it can. */
+    const setView = useCallback((zoom: number, pan: Pt) => {
+        const { video: v, area: a } = geo.current;
+        if (!v || !a.w) return;
+        const z = Math.min(MAX_ZOOM, Math.max(1, zoom));
+        const next = { zoom: z, pan: place(v, a, z, pan).pan };
+        viewRef.current = next;
+        setViewState(next);
+    }, []);
+
+    const resetZoom = () => setView(1, { x: 0, y: 0 });
+
+    /** Moves a zoomed-in picture so this point (0–1 on the picture) stays in sight. */
+    const follow = useCallback(
+        (nx: number, ny: number) => {
+            const { video: v, area: a } = geo.current;
+            const { zoom, pan } = viewRef.current;
+            if (!v || !a.w || zoom <= 1) return;
+            const l = place(v, a, zoom, pan);
+            const px = l.left + nx * l.w;
+            const py = l.top + ny * l.h;
+            const m = Math.min(48, a.w / 4, a.h / 4);
+            let dx = 0;
+            let dy = 0;
+            if (px < m) dx = m - px;
+            else if (px > a.w - m) dx = a.w - m - px;
+            if (py < m) dy = m - py;
+            else if (py > a.h - m) dy = a.h - m - py;
+            if (dx || dy) setView(zoom, { x: pan.x + dx, y: pan.y + dy });
+        },
+        [setView],
+    );
+
+    // The area changed size (the phone's keyboard came up, the phone turned): keep a zoomed-in
+    // picture in bounds, with the pointer in sight.
+    useEffect(() => {
+        const { zoom, pan } = viewRef.current;
+        if (zoom <= 1) return;
+        setView(zoom, pan);
+        const c = remote.current;
+        if (c && onPicture(c)) follow(c.x, c.y);
+    }, [area, video, setView, follow]);
 
     // ---- the computer's pointer -------------------------------------------------------------
 
@@ -316,7 +529,7 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
         const el = canvasRef.current;
         const ov = overlayRef.current;
         if (!el || !ov) return;
-        const { layout: l, pointsWide, control, live: on } = view.current;
+        const { layout: l, pointsWide, control, live: on } = paint.current;
         const c = remote.current;
         const local = hovering.current && control;
         const fallback = control ? 'default' : 'not-allowed';
@@ -362,21 +575,23 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
             ctx?.clearRect(0, 0, ov.width, ov.height);
             ctx?.drawImage(shape.image, 0, 0);
         }
-        const sx = w / shape.width;
-        const sy = h / shape.height;
+        // On a phone the picture is small: keep the pointer big enough to see.
+        const grow = touchDevice ? Math.max(1, Math.min(2, 16 / Math.max(w, h, 1))) : 1;
+        const sx = (w * grow) / shape.width;
+        const sy = (h * grow) / shape.height;
         ov.style.display = 'block';
-        ov.style.width = `${w}px`;
-        ov.style.height = `${h}px`;
+        ov.style.width = `${w * grow}px`;
+        ov.style.height = `${h * grow}px`;
         ov.style.transform = `translate(${l.left + c.x * l.w - shape.hotX * sx}px, ${l.top + c.y * l.h - shape.hotY * sy}px)`;
-    }, []);
+    }, [touchDevice]);
 
     const pointsWide = hello?.displays.find((d) => d.id === display)?.width ?? 0;
     useLayoutEffect(() => {
-        view.current = { layout, pointsWide, control: canControl, live };
+        paint.current = { layout, pointsWide, control: canControl, live };
         paintCursor();
     }, [layout, pointsWide, canControl, live, paintCursor]);
 
-    /** Moved here (a finger, in trackpad mode): show it there before the computer says so. */
+    /** Moved here (by a finger): show it there before the computer says so. */
     const movedLocally = (x: number, y: number) => {
         localUntil.current = performance.now() + 400;
         if (remote.current) {
@@ -399,195 +614,387 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
         }
     };
 
-    // ---- mouse ---------------------------------------------------------------------------
+    // ---- sending -------------------------------------------------------------------------
 
-    const norm = (clientX: number, clientY: number) => {
+    /** A point on the screen as 0–1 across the picture (outside it: below 0 or above 1). */
+    const norm = (clientX: number, clientY: number): Pt => {
         const r = canvasRef.current!.getBoundingClientRect();
 
         return { x: (clientX - r.left) / r.width, y: (clientY - r.top) / r.height };
     };
 
-    const pendingMove = useRef<{ x: number; y: number } | null>(null);
-    const moveFrame = useRef(0);
-    const sendMove = (x: number, y: number) => {
-        pendingMove.current = { x, y };
-        if (!moveFrame.current) {
-            moveFrame.current = requestAnimationFrame(() => {
-                moveFrame.current = 0;
-                const p = pendingMove.current;
-                if (p) clientRef.current?.pointer(p.x, p.y, 'move');
-            });
-        }
+    /** A point on the screen in the viewing area's own pixels. */
+    const inArea = (p: Pt): Pt => {
+        const r = areaRef.current!.getBoundingClientRect();
+
+        return { x: p.x - r.left, y: p.y - r.top };
     };
 
-    // ---- touch: trackpad (relative) or direct, two fingers scroll, pinch zooms ----------
-
-    const cursor = useRef({ x: 0.5, y: 0.5 });
-    const touches = useRef(new Map<number, { x: number; y: number; sx: number; sy: number; t: number }>());
-    const gesture = useRef<{ moved: boolean; dragging: boolean; hold: number; two: boolean; dist: number; zoomed: boolean; lastTap: number } | null>(null);
-    const lastTapAt = useRef(0);
-
-    /** Keeps the cursor on screen when zoomed in (trackpad mode). */
-    const follow = (nx: number, ny: number) => {
-        if (!layout || zoom <= 1 || fit !== 'fit') return;
-        const px = layout.left + nx * layout.w;
-        const py = layout.top + ny * layout.h;
-        const margin = 40;
-        let dx = 0;
-        let dy = 0;
-        if (px < margin) dx = margin - px;
-        if (px > area.w - margin) dx = area.w - margin - px;
-        if (py < margin) dy = margin - py;
-        if (py > area.h - margin) dy = area.h - margin - py;
-        if (dx || dy) setPan((p) => ({ x: p.x + dx, y: p.y + dy }));
+    // Moves and scrolls go out at most once a frame.
+    const pendingMove = useRef<Pt | null>(null);
+    const pendingWheel = useRef({ dx: 0, dy: 0 });
+    const frame = useRef(0);
+    /** Sends what's waiting now (before a press or release, so they keep their order). */
+    const flushNow = () => {
+        cancelAnimationFrame(frame.current);
+        frame.current = 0;
+        const c = clientRef.current;
+        const p = pendingMove.current;
+        pendingMove.current = null;
+        if (p) c?.pointer(p.x, p.y, 'move');
+        const w = pendingWheel.current;
+        if (w.dx || w.dy) c?.wheel(Math.round(w.dx), Math.round(w.dy));
+        pendingWheel.current = { dx: 0, dy: 0 };
+    };
+    const flush = () => {
+        if (!frame.current) frame.current = requestAnimationFrame(flushNow);
+    };
+    /** A press or release, after any move still waiting. */
+    const press = (x: number, y: number, action: 'down' | 'up', which = 0, clicks = 1) => {
+        flushNow();
+        clientRef.current?.pointer(x, y, action, which, clicks);
+    };
+    const sendMove = (x: number, y: number) => {
+        pendingMove.current = { x, y };
+        flush();
+    };
+    const sendWheel = (dx: number, dy: number) => {
+        pendingWheel.current.dx += dx;
+        pendingWheel.current.dy += dy;
+        flush();
     };
 
     const click = (x: number, y: number, button: number, clicks = 1) => {
         const c = clientRef.current;
         if (!c) return;
+        flushNow();
         c.pointer(x, y, 'move');
         c.pointer(x, y, 'down', button, clicks);
         c.pointer(x, y, 'up', button, clicks);
     };
 
-    const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-        if (!canControl) return;
-        const c = clientRef.current;
-        if (!c) return;
-        if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
-            e.currentTarget.setPointerCapture(e.pointerId);
-            const p = norm(e.clientX, e.clientY);
-            c.pointer(p.x, p.y, 'move');
-            c.pointer(p.x, p.y, 'down', e.button, Math.max(1, e.detail));
-            e.preventDefault();
-            return;
-        }
-        // Touch.
-        e.preventDefault();
-        e.currentTarget.setPointerCapture(e.pointerId);
-        touches.current.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, t: performance.now() });
-        const n = touches.current.size;
-        if (n === 1) {
-            const g = { moved: false, dragging: false, hold: 0, two: false, dist: 0, zoomed: false, lastTap: 0 };
-            if (touchMode === 'trackpad') {
-                g.hold = window.setTimeout(() => {
-                    // Press and hold, then move: drag.
-                    if (!g.moved) {
-                        g.dragging = true;
-                        c.pointer(cursor.current.x, cursor.current.y, 'down', 0, 1);
-                        navigator.vibrate?.(10);
-                    }
-                }, 450);
-            } else {
-                const p = norm(e.clientX, e.clientY);
-                cursor.current = p;
-                c.pointer(p.x, p.y, 'move');
-            }
-            gesture.current = g;
-        } else if (n === 2 && gesture.current) {
-            window.clearTimeout(gesture.current.hold);
-            gesture.current.two = true;
-            const [a, b] = [...touches.current.values()];
-            gesture.current.dist = Math.hypot(a.x - b.x, a.y - b.y);
-        }
+    // ---- scrolling with fingers, and its fling ----------------------------------------------
+
+    const fling = useRef(0);
+    const stopFling = () => {
+        cancelAnimationFrame(fling.current);
+        fling.current = 0;
+    };
+    useEffect(() => () => cancelAnimationFrame(fling.current), []);
+
+    /** Scrolls as the fingers moved (CSS pixels): the computer's content follows them. */
+    const fingerScroll = (g: Gesture, dx: number, dy: number) => {
+        const { layout: l, pointsWide: pw } = paint.current;
+        const k = l && pw ? Math.max(1, pw / l.w) : 2;
+        const wx = -dx * k;
+        const wy = -dy * k;
+        sendWheel(wx, wy);
+        const now = performance.now();
+        g.samples.push({ t: now, dx: wx, dy: wy });
+        while (g.samples.length > 1 && now - g.samples[0].t > 100) g.samples.shift();
     };
 
-    const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-        if (!canControl) return;
-        const c = clientRef.current;
-        if (!c) return;
-        if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
-            if (!hovering.current) {
-                hovering.current = true;
-                paintCursor();
+    /** Fingers let go while scrolling: keep going for a moment, slowing down. */
+    const flingFrom = (g: Gesture) => {
+        const s = g.samples;
+        const now = performance.now();
+        if (s.length < 2 || now - s[s.length - 1].t > 60) return;
+        const span = Math.max(16, now - s[0].t);
+        let vx = s.reduce((a, b) => a + b.dx, 0) / span;
+        let vy = s.reduce((a, b) => a + b.dy, 0) / span;
+        if (Math.hypot(vx, vy) < 0.4) return;
+        stopFling();
+        let last = now;
+        const step = (t: number) => {
+            const dt = Math.min(48, Math.max(0, t - last));
+            last = t;
+            const k = Math.pow(0.95, dt / 16);
+            vx *= k;
+            vy *= k;
+            if (Math.hypot(vx, vy) < 0.05) {
+                fling.current = 0;
+                return;
             }
+            sendWheel(vx * dt, vy * dt);
+            fling.current = requestAnimationFrame(step);
+        };
+        fling.current = requestAnimationFrame(step);
+    };
+
+    // ---- zooming and moving the picture with two fingers -------------------------------------
+
+    /** The fingers went from (`m0`, `d0` apart) to (`m1`, `d1` apart), in area pixels. */
+    const moveView = (m0: Pt, d0: number, m1: Pt, d1: number) => {
+        const { video: v, area: a } = geo.current;
+        if (!v || !a.w) return;
+        const { zoom, pan } = viewRef.current;
+        const l = place(v, a, zoom, pan);
+        // The picture's point under the fingers stays under them.
+        const u = (m0.x - l.left) / l.w;
+        const w0 = (m0.y - l.top) / l.h;
+        const z = Math.min(MAX_ZOOM, Math.max(1, zoom * (d0 > 0 ? d1 / d0 : 1)));
+        const s = Math.min(a.w / v.w, a.h / v.h) * z;
+        const w = v.w * s;
+        const h = v.h * s;
+        setView(z, { x: m1.x - u * w - (a.w - w) / 2, y: m1.y - w0 * h - (a.h - h) / 2 });
+    };
+
+    // ---- touch: trackpad (relative) or direct ------------------------------------------------
+
+    const cursor = useRef<Pt>({ x: 0.5, y: 0.5 });
+    const touches = useRef(new Map<number, Touch>());
+    const gesture = useRef<Gesture | null>(null);
+    const viewFrame = useRef(0);
+    const lastTap = useRef<{ t: number; cx: number; cy: number; at: Pt } | null>(null);
+
+    /** The two first fingers: their midpoint (client pixels) and distance. */
+    const pair = () => {
+        const [a, b] = [...touches.current.values()];
+
+        return { m: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, d: Math.hypot(a.x - b.x, a.y - b.y) };
+    };
+
+    const onTouchDown = (e: React.PointerEvent<HTMLDivElement>, c: ScreenClient) => {
+        e.preventDefault();
+        stopFling();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        const now = performance.now();
+        touches.current.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, t: now });
+        const n = touches.current.size;
+        const g0 = gesture.current;
+        if (n === 1 || !g0) {
             const p = norm(e.clientX, e.clientY);
-            sendMove(p.x, p.y);
+            const g: Gesture = {
+                primary: e.pointerId,
+                fingers: 1,
+                moved: false,
+                held: false,
+                dragging: false,
+                hold: 0,
+                started: now,
+                onPicture: onPicture(p),
+                two: 'undecided',
+                dist0: 0,
+                mid0: { x: 0, y: 0 },
+                last: null,
+                samples: [],
+            };
+            if (touchMode === 'touch' && g.onPicture) {
+                cursor.current = p;
+                c.pointer(p.x, p.y, 'move');
+                movedLocally(p.x, p.y);
+            }
+            if (touchMode === 'trackpad' || g.onPicture) {
+                g.hold = window.setTimeout(() => {
+                    if (g.moved || g.fingers > 1 || gesture.current !== g) return;
+                    g.held = true;
+                    navigator.vibrate?.(10);
+                    // Trackpad: press now, so moving drags. Touch: wait to see if it moves (drag)
+                    // or lets go (right-click).
+                    if (touchMode === 'trackpad') {
+                        g.dragging = true;
+                        press(cursor.current.x, cursor.current.y, 'down');
+                    }
+                }, HOLD_MS);
+            }
+            gesture.current = g;
             return;
         }
+        g0.fingers = Math.max(g0.fingers, n);
+        // A second finger while dragging: the drag goes on, that finger is ignored.
+        if (g0.dragging || n !== 2) return;
+        window.clearTimeout(g0.hold);
+        const { m, d } = pair();
+        g0.two = 'undecided';
+        g0.dist0 = d;
+        g0.mid0 = m;
+    };
+
+    const onTouchMove = (e: React.PointerEvent<HTMLDivElement>) => {
         const t = touches.current.get(e.pointerId);
         const g = gesture.current;
         if (!t || !g) return;
+        const two = touches.current.size >= 2 && !g.dragging;
+        const before = two ? pair() : null;
+        const now = performance.now();
         const dx = e.clientX - t.x;
         const dy = e.clientY - t.y;
+        const dt = Math.max(1, now - t.t);
         t.x = e.clientX;
         t.y = e.clientY;
-        if (Math.hypot(e.clientX - t.sx, e.clientY - t.sy) > 8) {
-            if (!g.moved && !g.dragging) window.clearTimeout(g.hold);
+        t.t = now;
+        if (!g.moved && Math.hypot(e.clientX - t.sx, e.clientY - t.sy) > SLOP) {
             g.moved = true;
+            if (!g.held) window.clearTimeout(g.hold);
         }
-        if (touches.current.size >= 2) {
-            const [a, b] = [...touches.current.values()];
-            const dist = Math.hypot(a.x - b.x, a.y - b.y);
-            if (fit === 'fit' && (g.zoomed || Math.abs(dist - g.dist) > 24)) {
-                // Pinch: zoom the picture here (not on the computer).
-                g.zoomed = true;
-                const ratio = dist / Math.max(1, g.dist);
-                g.dist = dist;
-                setZoom((z) => Math.min(6, Math.max(1, z * ratio)));
-                setPan((p) => ({ x: p.x + dx / 2, y: p.y + dy / 2 }));
-            } else if (e.pointerId === [...touches.current.keys()][0]) {
-                // Two fingers: scroll (natural, as on a trackpad).
-                c.wheel(-dx * 2, -dy * 2);
+
+        if (before) {
+            const after = pair();
+            if (g.two === 'undecided') {
+                if (Math.abs(after.d - g.dist0) > 24) g.two = 'view';
+                else if (Math.hypot(after.m.x - g.mid0.x, after.m.y - g.mid0.y) > 10) {
+                    // Touch mode: two fingers move a zoomed-in picture (one finger scrolls).
+                    g.two = touchMode === 'touch' && viewRef.current.zoom > 1 ? 'view' : 'scroll';
+                } else return;
+            } else if (g.two === 'scroll' && Math.abs(after.d - g.dist0) > 48) {
+                g.two = 'view';
+                g.samples = [];
+            }
+            if (g.two === 'scroll') {
+                fingerScroll(g, after.m.x - before.m.x, after.m.y - before.m.y);
+                return;
+            }
+            // Each finger reports on its own: move the picture once both have, each frame
+            // (half-moved fingers look like a pinch, and the edges would eat the move).
+            if (!viewFrame.current) {
+                viewFrame.current = requestAnimationFrame(() => {
+                    viewFrame.current = 0;
+                    if (gesture.current !== g || touches.current.size < 2) return;
+                    const now = pair();
+                    if (g.last) moveView(inArea(g.last.m), g.last.d, inArea(now.m), now.d);
+                    g.last = now;
+                });
             }
             return;
         }
+
+        // One finger: the first, unless a second one took part (then it waits for all to lift).
+        if (e.pointerId !== g.primary || (g.fingers > 1 && !g.dragging)) return;
         if (touchMode === 'trackpad') {
             if (!g.moved && !g.dragging) return;
+            // Faster moves go further: slow ones stay precise on a small screen.
+            const speed = Math.hypot(dx, dy) / dt;
+            const gain = Math.min(4, 0.9 + 1.3 * speed);
             const r = canvasRef.current!.getBoundingClientRect();
-            const speed = 1.6;
-            cursor.current = {
-                x: Math.min(1, Math.max(0, cursor.current.x + (dx * speed) / r.width)),
-                y: Math.min(1, Math.max(0, cursor.current.y + (dy * speed) / r.height)),
-            };
+            cursor.current = clamp01({ x: cursor.current.x + (dx * gain) / r.width, y: cursor.current.y + (dy * gain) / r.height });
             sendMove(cursor.current.x, cursor.current.y);
             movedLocally(cursor.current.x, cursor.current.y);
             follow(cursor.current.x, cursor.current.y);
-        } else {
-            const p = norm(e.clientX, e.clientY);
-            if (!g.dragging && g.moved) {
+        } else if (g.held) {
+            if (!g.dragging) {
                 g.dragging = true;
-                c.pointer(cursor.current.x, cursor.current.y, 'down', 0, 1);
+                press(cursor.current.x, cursor.current.y, 'down');
             }
+            const p = clamp01(norm(e.clientX, e.clientY));
             cursor.current = p;
             sendMove(p.x, p.y);
+            movedLocally(p.x, p.y);
+        } else if (g.moved) {
+            fingerScroll(g, dx, dy);
         }
     };
 
-    const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
-        if (!canControl) return;
-        const c = clientRef.current;
-        if (!c) return;
-        if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
-            const p = norm(e.clientX, e.clientY);
-            c.pointer(p.x, p.y, 'up', e.button, Math.max(1, e.detail));
+    const onTouchUp = (e: React.PointerEvent<HTMLDivElement>, cancelled: boolean) => {
+        if (!touches.current.delete(e.pointerId)) return;
+        const g = gesture.current;
+        if (!g) return;
+        if (touches.current.size > 0) {
+            // The dragging finger lifted: let go, even if another is still down.
+            if (g.dragging && e.pointerId === g.primary) {
+                g.dragging = false;
+                g.fingers = Math.max(g.fingers, 2);
+                press(cursor.current.x, cursor.current.y, 'up');
+            }
             return;
         }
-        const t = touches.current.get(e.pointerId);
-        touches.current.delete(e.pointerId);
-        const g = gesture.current;
-        if (!t || !g) return;
-        if (touches.current.size > 0) return;
         window.clearTimeout(g.hold);
         gesture.current = null;
+        const tapped = !cancelled && !g.dragging && !g.moved && !g.held && g.fingers === 1 && (touchMode === 'trackpad' || g.onPicture);
+        if (!tapped) lastTap.current = null;
         if (g.dragging) {
-            c.pointer(cursor.current.x, cursor.current.y, 'up', 0, 1);
+            press(cursor.current.x, cursor.current.y, 'up');
             return;
         }
-        if (g.moved || g.zoomed) return;
-        if (g.two) {
-            click(cursor.current.x, cursor.current.y, 2);
-            return;
-        }
-        // A tap: click (two quick taps: double click).
+        if (cancelled) return;
         const now = performance.now();
-        const double = now - lastTapAt.current < 350;
-        lastTapAt.current = double ? 0 : now;
-        if (touchMode === 'touch') {
-            cursor.current = norm(e.clientX, e.clientY);
+        if (g.fingers > 1) {
+            if (g.two === 'scroll') flingFrom(g);
+            else if (g.fingers === 2 && g.two === 'undecided' && now - g.started < 500) click(cursor.current.x, cursor.current.y, 2);
+            return;
         }
-        click(cursor.current.x, cursor.current.y, 0, double ? 2 : 1);
+        if (touchMode === 'touch') {
+            if (g.moved) {
+                flingFrom(g);
+                return;
+            }
+            if (!g.onPicture) return;
+            if (g.held) {
+                click(cursor.current.x, cursor.current.y, 2);
+                return;
+            }
+        } else if (g.moved) {
+            return;
+        }
+        // A tap: click. Two quick taps: double-click, where the first one was (fingers wobble).
+        const last = lastTap.current;
+        const double = !!last && now - last.t < 400 && (touchMode === 'trackpad' || Math.hypot(e.clientX - last.cx, e.clientY - last.cy) < 32);
+        const at = double && last && touchMode === 'touch' ? last.at : { ...cursor.current };
+        lastTap.current = double ? null : { t: now, cx: e.clientX, cy: e.clientY, at };
+        click(at.x, at.y, 0, double ? 2 : 1);
     };
+
+    // ---- the picture's pointer events: a mouse on the picture, fingers anywhere in the area ---
+
+    /** Mouse buttons pressed on the picture: their release goes out wherever the mouse is then. */
+    const mouseDown = useRef(new Set<number>());
+
+    const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+        const c = clientRef.current;
+        if (!canControl || !live || !c || isControl(e.target)) return;
+        if (e.pointerType === 'touch') {
+            onTouchDown(e, c);
+            return;
+        }
+        if (e.target !== canvasRef.current) return;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        const p = norm(e.clientX, e.clientY);
+        flushNow();
+        mouseDown.current.add(e.button);
+        c.pointer(p.x, p.y, 'move');
+        c.pointer(p.x, p.y, 'down', e.button, Math.max(1, e.detail));
+        e.preventDefault();
+    };
+
+    const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+        const c = clientRef.current;
+        if (!canControl || !c) return;
+        if (e.pointerType === 'touch') {
+            onTouchMove(e);
+            return;
+        }
+        if (e.target !== canvasRef.current && mouseDown.current.size === 0) return;
+        if (!hovering.current && e.target === canvasRef.current) {
+            hovering.current = true;
+            paintCursor();
+        }
+        const p = clamp01(norm(e.clientX, e.clientY));
+        sendMove(p.x, p.y);
+    };
+
+    const onPointerUp = (e: React.PointerEvent<HTMLDivElement>, cancelled = false) => {
+        const c = clientRef.current;
+        if (!canControl || !c) return;
+        if (e.pointerType === 'touch') {
+            onTouchUp(e, cancelled);
+            return;
+        }
+        if (!mouseDown.current.delete(e.button)) return;
+        const p = clamp01(norm(e.clientX, e.clientY));
+        press(p.x, p.y, 'up', e.button, Math.max(1, e.detail));
+    };
+
+    // Touches on the picture mustn't turn into clicks or focus changes in this page: those
+    // would close the phone's keyboard while typing. (React's touch listeners are passive.)
+    useEffect(() => {
+        const el = areaRef.current;
+        if (!el) return;
+        const stop = (e: TouchEvent) => {
+            if (!isControl(e.target)) e.preventDefault();
+        };
+        el.addEventListener('touchstart', stop, { passive: false });
+
+        return () => el.removeEventListener('touchstart', stop);
+    }, []);
 
     // Wheel needs a non-passive listener to stop the page from scrolling.
     useEffect(() => {
@@ -606,7 +1013,7 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
 
     // ---- keyboard ------------------------------------------------------------------------
 
-    const dialogOpen = clipText !== null;
+    const dialogOpen = clipText !== null || sheet;
     useEffect(() => {
         if (!live || !canControl || dialogOpen) return;
         const ours = (t: EventTarget | null) => t instanceof HTMLElement && (t.closest('.screen-bar, .screen-keys') !== null || t === kbRef.current);
@@ -679,16 +1086,24 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
         }
     };
 
-    const openKeyboard = () => {
+    // Android's own "hide keyboard" leaves the field focused: then the button brings it back.
+    const keyboardSeen = useRef(false);
+    useEffect(() => {
+        if (!keyboardOpen) keyboardSeen.current = false;
+        else if (keyboardUp) keyboardSeen.current = true;
+    }, [keyboardOpen, keyboardUp]);
+
+    const toggleKeyboard = () => {
         const el = kbRef.current;
         if (!el) return;
-        if (keyboardOpen) {
+        if (keyboardOpen && !(keyboardSeen.current && !keyboardUp)) {
             el.blur();
             setKeyboardOpen(false);
             return;
         }
+        el.blur();
         el.value = KB_PAD;
-        el.focus();
+        el.focus({ preventScroll: true });
         setKeyboardOpen(true);
     };
 
@@ -696,6 +1111,7 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
 
     const sendClipboard = async () => {
         setMenu(null);
+        setSheet(false);
         try {
             const text = await navigator.clipboard.readText();
             clientRef.current?.setClipboard(text);
@@ -703,6 +1119,12 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
             // No permission to read it (or not supported): type or paste it in a box.
             setClipText({ mode: 'to', text: '' });
         }
+    };
+
+    const getClipboard = () => {
+        clientRef.current?.getClipboard();
+        setMenu(null);
+        setSheet(false);
     };
 
     const toggleFullscreen = async () => {
@@ -715,7 +1137,7 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
                 await (navigator as Navigator & { keyboard?: { lock?: () => Promise<void> } }).keyboard?.lock?.();
             }
         } catch {
-            // Not allowed here (e.g. iPhone): ignore.
+            // Not allowed here: ignore.
         }
     };
 
@@ -724,107 +1146,149 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
     const shown = displays.find((d) => d.id === display);
     // Beyond 4K needs HEVC, which only Macs encode.
     const nativeWide = shown && isMacTarget(hello?.os) && Math.round(shown.width * shown.scale) > 3840 ? Math.round(shown.width * shown.scale) : 0;
+    const qualities = QUALITIES.filter((q) => q.value !== 'native' || nativeWide > 0 || quality === 'native');
+    const swapLabel = hello && defaultSwap(hello.os) ? (isMacTarget(hello.os) ? 'Ctrl = ⌘' : '⌘ = Ctrl') : null;
+    const swapTitle = isMacTarget(hello?.os) ? 'Use Ctrl as the Mac’s ⌘ key' : 'Use ⌘ as the computer’s Ctrl key';
+    /** Buttons near the picture keep the phone keyboard's focus (a tap would close it). */
+    const keepFocus = (e: React.PointerEvent) => e.preventDefault();
+    const showKeys = canControl && touchDevice && (chrome || keyboardOpen);
 
     return (
-        <div ref={rootRef} className="flex min-h-0 flex-1 flex-col bg-black">
-            <Bar name={name} onClose={onClose}>
-                <StatusChip state={state} stats={stats} />
-                {displays.length > 1 && (
-                    <select className="hchip cursor-pointer bg-transparent" aria-label="Display" value={display ?? ''} onChange={(e) => clientRef.current?.display(Number(e.target.value))}>
-                        {displays.map((d) => (
-                            <option key={d.id} value={d.id}>
-                                {d.name}
-                                {d.primary ? ' (main)' : ''}
-                            </option>
-                        ))}
-                    </select>
-                )}
-                <select className="hchip cursor-pointer bg-transparent" aria-label="Picture quality" value={quality} onChange={(e) => clientRef.current?.quality(e.target.value as Quality)}>
-                    <option value="low">Low (data saver)</option>
-                    <option value="balanced">Balanced</option>
-                    <option value="high">Sharp (4K)</option>
-                    {(nativeWide > 0 || quality === 'native') && <option value="native">Native{nativeWide ? ` (${nativeWide} px, fewer fps)` : ''}</option>}
-                </select>
-                {!touchDevice && (
-                    <button type="button" className={cn('hchip', fit === 'actual' && 'on')} aria-pressed={fit === 'actual'} onClick={() => setFit(fit === 'fit' ? 'actual' : 'fit')} title="Show one screen pixel per pixel">
-                        {fit === 'fit' ? 'Fit' : '1:1'}
-                    </button>
-                )}
-                {touchDevice && (
-                    <button type="button" className="hchip" onClick={() => setTouchMode(touchMode === 'trackpad' ? 'touch' : 'trackpad')} title="How touches move the pointer">
-                        {touchMode === 'trackpad' ? 'Trackpad' : 'Touch'}
-                    </button>
-                )}
-                {touchDevice && zoom > 1 && (
-                    <button type="button" className="hchip" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}>
-                        Zoom {zoom.toFixed(1)}× · reset
-                    </button>
-                )}
-                {canControl && touchDevice && (
-                    <button type="button" className={cn('hchip', keyboardOpen && 'on')} aria-pressed={keyboardOpen} onClick={openKeyboard}>
-                        Keyboard
-                    </button>
-                )}
-                {canControl && hello && defaultSwap(hello.os) && (
-                    <button
-                        type="button"
-                        className={cn('hchip', swap && 'on')}
-                        aria-pressed={swap}
-                        onClick={() => setSwap(!swap)}
-                        title={isMacTarget(hello.os) ? 'Use Ctrl as the Mac’s ⌘ key' : 'Use ⌘ as the computer’s Ctrl key'}
-                    >
-                        {isMacTarget(hello.os) ? 'Ctrl = ⌘' : '⌘ = Ctrl'}
-                    </button>
-                )}
-                {canControl && (
-                    <Menu label="Keys" open={menu === 'keys'} onOpen={(o) => setMenu(o ? 'keys' : null)}>
-                        {shortcuts(hello?.os).map((s) => (
-                            <button key={s.label} type="button" className="menu-item" onClick={() => { clientRef.current?.combo(s.mods, s.code); setMenu(null); }}>
-                                {s.label}
+        <div ref={rootRef} className="relative flex min-h-0 flex-1 flex-col bg-black">
+            {chrome && (
+                <Bar name={name} onClose={onClose}>
+                    <StatusChip state={state} stats={stats} compact={compact} />
+                    {compact ? (
+                        <>
+                            <span className="flex-1" />
+                            {zoomed && (
+                                <button type="button" className="hchip shrink-0 tabular-nums" onPointerDown={keepFocus} onClick={resetZoom} title="Back to the whole screen">
+                                    {view.zoom.toFixed(1)}× ✕
+                                </button>
+                            )}
+                            {canControl && touchDevice && (
+                                <button type="button" className="hchip shrink-0" onPointerDown={keepFocus} onClick={() => setTouchMode(touchMode === 'trackpad' ? 'touch' : 'trackpad')} title="How touches move the pointer">
+                                    {touchMode === 'trackpad' ? 'Trackpad' : 'Touch'}
+                                </button>
+                            )}
+                            {canControl && touchDevice && (
+                                <button type="button" className={cn('icon-btn', keyboardOpen && 'on')} onPointerDown={keepFocus} onClick={toggleKeyboard} aria-pressed={keyboardOpen} aria-label="Keyboard" title="Keyboard">
+                                    <Glyph name="keyboard" />
+                                </button>
+                            )}
+                            <button type="button" className="icon-btn" onPointerDown={keepFocus} onClick={() => setSheet(true)} aria-label="More" title="More">
+                                <Glyph name="more" />
                             </button>
-                        ))}
-                    </Menu>
-                )}
-                <Menu label="Clipboard" open={menu === 'clipboard'} onOpen={(o) => setMenu(o ? 'clipboard' : null)}>
-                    <button type="button" className="menu-item" onClick={() => void sendClipboard()}>
-                        Send my clipboard to the computer
-                    </button>
-                    <button type="button" className="menu-item" onClick={() => { clientRef.current?.getClipboard(); setMenu(null); }}>
-                        Get the computer’s clipboard
-                    </button>
-                </Menu>
-                {!touchDevice && (
-                    <button type="button" className="icon-btn ml-auto" onClick={() => void toggleFullscreen()} aria-label={fullscreen ? 'Leave full screen' : 'Full screen'} title={fullscreen ? 'Leave full screen' : 'Full screen'}>
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-                            {fullscreen ? <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" /> : <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />}
-                        </svg>
-                    </button>
-                )}
-            </Bar>
+                        </>
+                    ) : (
+                        <>
+                            {displays.length > 1 && (
+                                <select className="hchip cursor-pointer bg-transparent" aria-label="Display" value={display ?? ''} onChange={(e) => clientRef.current?.display(Number(e.target.value))}>
+                                    {displays.map((d) => (
+                                        <option key={d.id} value={d.id}>
+                                            {d.name}
+                                            {d.primary ? ' (main)' : ''}
+                                        </option>
+                                    ))}
+                                </select>
+                            )}
+                            <select className="hchip cursor-pointer bg-transparent" aria-label="Picture quality" value={quality} onChange={(e) => clientRef.current?.quality(e.target.value as Quality)}>
+                                {qualities.map((q) => (
+                                    <option key={q.value} value={q.value}>
+                                        {q.value === 'native' && nativeWide ? `Native (${nativeWide} px, fewer fps)` : q.label}
+                                    </option>
+                                ))}
+                            </select>
+                            {!touchDevice && (
+                                <button type="button" className={cn('hchip', fit === 'actual' && 'on')} aria-pressed={fit === 'actual'} onClick={() => setFit(fit === 'fit' ? 'actual' : 'fit')} title="Show one screen pixel per pixel">
+                                    {fit === 'fit' ? 'Fit' : '1:1'}
+                                </button>
+                            )}
+                            {touchDevice && (
+                                <button type="button" className="hchip" onPointerDown={keepFocus} onClick={() => setTouchMode(touchMode === 'trackpad' ? 'touch' : 'trackpad')} title="How touches move the pointer">
+                                    {touchMode === 'trackpad' ? 'Trackpad' : 'Touch'}
+                                </button>
+                            )}
+                            {touchDevice && zoomed && (
+                                <button type="button" className="hchip" onPointerDown={keepFocus} onClick={resetZoom}>
+                                    Zoom {view.zoom.toFixed(1)}× · reset
+                                </button>
+                            )}
+                            {canControl && touchDevice && (
+                                <button type="button" className={cn('hchip', keyboardOpen && 'on')} aria-pressed={keyboardOpen} onPointerDown={keepFocus} onClick={toggleKeyboard}>
+                                    Keyboard
+                                </button>
+                            )}
+                            {canControl && swapLabel && (
+                                <button type="button" className={cn('hchip', swap && 'on')} aria-pressed={swap} onClick={() => setSwap(!swap)} title={swapTitle}>
+                                    {swapLabel}
+                                </button>
+                            )}
+                            {canControl && (
+                                <Menu label="Keys" open={menu === 'keys'} onOpen={(o) => setMenu(o ? 'keys' : null)}>
+                                    {shortcuts(hello?.os).map((s) => (
+                                        <button key={s.label} type="button" className="menu-item" onClick={() => { clientRef.current?.combo(s.mods, s.code); setMenu(null); }}>
+                                            {s.label}
+                                        </button>
+                                    ))}
+                                </Menu>
+                            )}
+                            <Menu label="Clipboard" open={menu === 'clipboard'} onOpen={(o) => setMenu(o ? 'clipboard' : null)}>
+                                <button type="button" className="menu-item" onClick={() => void sendClipboard()}>
+                                    Send my clipboard to the computer
+                                </button>
+                                <button type="button" className="menu-item" onClick={getClipboard}>
+                                    Get the computer’s clipboard
+                                </button>
+                            </Menu>
+                            {canFullscreen && (
+                                <button type="button" className="icon-btn ml-auto" onClick={() => void toggleFullscreen()} aria-label={fullscreen ? 'Leave full screen' : 'Full screen'} title={fullscreen ? 'Leave full screen' : 'Full screen'}>
+                                    <Glyph name={fullscreen ? 'shrink' : 'expand'} />
+                                </button>
+                            )}
+                        </>
+                    )}
+                </Bar>
+            )}
 
-            {hello && !hello.input && live && (
+            {chrome && hello && !hello.input && live && (
                 <p className="m-0 shrink-0 bg-amber-bg px-3 py-1.5 text-center text-[13px] text-amber-soft">
                     View only: Termlab on this computer isn’t allowed to control it. On the computer, allow Termlab under System Settings › Privacy & Security › Accessibility.
                 </p>
             )}
 
-            <div ref={areaRef} className={cn('relative min-h-0 flex-1', fit === 'actual' ? 'overflow-auto' : 'overflow-hidden')}>
+            <div
+                ref={areaRef}
+                className={cn('relative min-h-0 flex-1 touch-none select-none', fit === 'actual' ? 'overflow-auto' : 'overflow-hidden')}
+                onPointerDown={onPointerDown}
+                onPointerMove={onPointerMove}
+                onPointerUp={(e) => onPointerUp(e)}
+                onPointerCancel={(e) => onPointerUp(e, true)}
+                onContextMenu={(e) => e.preventDefault()}
+            >
                 <canvas
                     ref={canvasRef}
                     width={16}
                     height={9}
-                    className={cn('screen-canvas absolute touch-none select-none', !live && 'opacity-0')}
+                    className={cn('screen-canvas absolute', !live && 'opacity-0')}
                     style={layout ? { width: layout.w, height: layout.h, left: layout.left, top: layout.top } : { width: 0, height: 0 }}
                     onPointerEnter={onPointerEnter}
                     onPointerLeave={onPointerLeave}
-                    onPointerDown={onPointerDown}
-                    onPointerMove={onPointerMove}
-                    onPointerUp={onPointerUp}
-                    onPointerCancel={onPointerUp}
-                    onContextMenu={(e) => e.preventDefault()}
                 />
                 {/* The computer's pointer, when the browser's own isn't over the picture. */}
                 <canvas ref={overlayRef} aria-hidden className="pointer-events-none absolute top-0 left-0 hidden origin-top-left" />
+                {!chrome && (
+                    <button
+                        type="button"
+                        className="icon-btn absolute top-2 right-2 z-10 border-line bg-[rgba(15,17,19,0.72)] text-ink"
+                        onPointerDown={keepFocus}
+                        onClick={() => setChrome(true)}
+                        aria-label="Show the toolbar"
+                        title="Show the toolbar"
+                    >
+                        <Glyph name="bars" />
+                    </button>
+                )}
                 {state.state !== 'live' && (
                     <div className="absolute inset-0 grid place-items-center p-4">
                         <Card>
@@ -846,11 +1310,11 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
                 )}
             </div>
 
-            {/* The phone keyboard types into this; it stays out of sight. */}
+            {/* The phone keyboard types into this; it stays out of sight. 16px, or iPhones zoom in on it. */}
             <input
                 ref={kbRef}
                 aria-label="Type on the computer"
-                className="pointer-events-none fixed bottom-0 left-0 h-px w-px opacity-0"
+                className="pointer-events-none fixed bottom-0 left-0 h-px w-px text-[16px] opacity-0"
                 autoCapitalize="off"
                 autoCorrect="off"
                 autoComplete="off"
@@ -861,8 +1325,8 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
                 onBlur={() => setKeyboardOpen(false)}
             />
 
-            {canControl && touchDevice && (
-                <div className="screen-keys flex shrink-0 gap-1 overflow-x-auto border-t border-line bg-surface px-1.5 py-1.5 pb-[max(6px,env(safe-area-inset-bottom))] [scrollbar-width:none]">
+            {showKeys && (
+                <div className={cn('screen-keys flex shrink-0 gap-1 overflow-x-auto border-t border-line bg-surface px-1.5 py-1.5 [scrollbar-width:none]', !keyboardUp && 'pb-[max(6px,env(safe-area-inset-bottom))]')}>
                     {modifiers(hello?.os).map((m) => {
                         const on = latched.includes(m.code);
 
@@ -872,7 +1336,7 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
                                 type="button"
                                 aria-pressed={on}
                                 className={cn('keycap', on && 'on')}
-                                onPointerDown={(e) => e.preventDefault()}
+                                onPointerDown={keepFocus}
                                 onClick={() => setLatched(on ? latched.filter((c) => c !== m.code) : [...latched, m.code])}
                             >
                                 {m.label}
@@ -880,12 +1344,112 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
                         );
                     })}
                     {KEYBAR.map((k) => (
-                        <button key={k.code} type="button" className="keycap" title={k.title} onPointerDown={(e) => e.preventDefault()} onClick={() => tapKey(k.code)}>
+                        <button key={k.code} type="button" className="keycap" title={k.title} onPointerDown={keepFocus} onClick={() => tapKey(k.code)}>
                             {k.label}
                         </button>
                     ))}
                 </div>
             )}
+
+            <Sheet open={sheet} onClose={() => setSheet(false)} title="Screen options">
+                <SheetSection title="Picture">
+                    <div className="segmented" role="radiogroup" aria-label="Picture quality">
+                        {qualities.map((q) => (
+                            <button key={q.value} type="button" role="radio" aria-checked={quality === q.value} className={cn('flex-1', quality === q.value && 'on')} onClick={() => clientRef.current?.quality(q.value)}>
+                                {q.short}
+                            </button>
+                        ))}
+                    </div>
+                    {nativeWide > 0 && <p className="m-0 text-[12px] text-dim">Native shows all {nativeWide} pixels, at fewer frames per second.</p>}
+                    {displays.length > 1 && (
+                        <select className={inputClass} aria-label="Display" value={display ?? ''} onChange={(e) => clientRef.current?.display(Number(e.target.value))}>
+                            {displays.map((d) => (
+                                <option key={d.id} value={d.id}>
+                                    {d.name}
+                                    {d.primary ? ' (main)' : ''}
+                                </option>
+                            ))}
+                        </select>
+                    )}
+                    {!touchDevice && (
+                        <div className="segmented" role="radiogroup" aria-label="Size">
+                            <button type="button" role="radio" aria-checked={fit === 'fit'} className={cn('flex-1', fit === 'fit' && 'on')} onClick={() => setFit('fit')}>
+                                Fit to window
+                            </button>
+                            <button type="button" role="radio" aria-checked={fit === 'actual'} className={cn('flex-1', fit === 'actual' && 'on')} onClick={() => setFit('actual')}>
+                                1:1 pixels
+                            </button>
+                        </div>
+                    )}
+                    {zoomed && (
+                        <button type="button" className="menu-item" onClick={() => { resetZoom(); setSheet(false); }}>
+                            Back to the whole screen (now {view.zoom.toFixed(1)}×)
+                        </button>
+                    )}
+                </SheetSection>
+
+                {canControl && touchDevice && (
+                    <SheetSection title="Touch">
+                        <div className="segmented" role="radiogroup" aria-label="Touch mode">
+                            {(['trackpad', 'touch'] as const).map((m) => (
+                                <button key={m} type="button" role="radio" aria-checked={touchMode === m} className={cn('flex-1', touchMode === m && 'on')} onClick={() => setTouchMode(m)}>
+                                    {m === 'trackpad' ? 'Trackpad' : 'Touch'}
+                                </button>
+                            ))}
+                        </div>
+                        <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[13px]">
+                            {GESTURES[touchMode].map(([g, what]) => (
+                                <div key={g} className="contents">
+                                    <dt className="text-ink-soft">{g}</dt>
+                                    <dd className="m-0 text-dim">{what}</dd>
+                                </div>
+                            ))}
+                        </dl>
+                    </SheetSection>
+                )}
+
+                {canControl && (
+                    <SheetSection title="Keys">
+                        {swapLabel && (
+                            <label className="flex cursor-pointer items-center justify-between gap-3 py-1">
+                                <span className="text-ink-soft">{swapTitle}</span>
+                                <input type="checkbox" className="switch" checked={swap} onChange={(e) => setSwap(e.target.checked)} />
+                            </label>
+                        )}
+                        <div className="flex flex-col">
+                            {shortcuts(hello?.os).map((s) => (
+                                <button key={s.label} type="button" className="menu-item" onClick={() => { clientRef.current?.combo(s.mods, s.code); setSheet(false); }}>
+                                    {s.label}
+                                </button>
+                            ))}
+                        </div>
+                    </SheetSection>
+                )}
+
+                <SheetSection title="Clipboard">
+                    <div className="flex flex-col">
+                        <button type="button" className="menu-item" onClick={() => void sendClipboard()}>
+                            Send my clipboard to the computer
+                        </button>
+                        <button type="button" className="menu-item" onClick={getClipboard}>
+                            Get the computer’s clipboard
+                        </button>
+                    </div>
+                </SheetSection>
+
+                <SheetSection title="View">
+                    <div className="flex flex-col">
+                        {canFullscreen && (
+                            <button type="button" className="menu-item" onClick={() => { setSheet(false); void toggleFullscreen(); }}>
+                                {fullscreen ? 'Leave full screen' : 'Full screen'}
+                            </button>
+                        )}
+                        <button type="button" className="menu-item" onClick={() => { setChrome(false); setSheet(false); }}>
+                            Hide the toolbar (the button top right brings it back)
+                        </button>
+                    </div>
+                </SheetSection>
+            </Sheet>
 
             <Dialog
                 open={clipText !== null}
@@ -932,21 +1496,26 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
     );
 }
 
-function StatusChip({ state, stats }: { state: ScreenState; stats: ScreenStats | null }) {
+function StatusChip({ state, stats, compact }: { state: ScreenState; stats: ScreenStats | null; compact: boolean }) {
     const color = state.state === 'live' ? '#3FB950' : state.state === 'ended' ? '#8B929C' : '#F5A524';
+    const rate = stats ? (stats.kbps >= 1000 ? `${(stats.kbps / 1000).toFixed(1)} Mbit/s` : `${stats.kbps} kbit/s`) : '';
     const label =
         state.state === 'live'
             ? stats
-                ? `${stats.fps} fps · ${stats.kbps >= 1000 ? `${(stats.kbps / 1000).toFixed(1)} Mbit/s` : `${stats.kbps} kbit/s`}`
+                ? compact
+                    ? `${stats.fps} fps`
+                    : `${stats.fps} fps · ${rate}`
                 : 'Live'
             : state.state === 'ended'
               ? 'Ended'
               : state.state === 'confirming'
-                ? 'Waiting for approval'
+                ? compact
+                    ? 'Waiting'
+                    : 'Waiting for approval'
                 : 'Connecting';
 
     return (
-        <span className="hchip shrink-0 tabular-nums" title={stats && stats.width ? `${stats.codec} ${stats.width}×${stats.height}` : undefined}>
+        <span className="hchip shrink-0 tabular-nums" title={stats && stats.width ? `${stats.codec} ${stats.width}×${stats.height} · ${rate}` : undefined}>
             <span aria-hidden="true" className="dot" style={{ background: color }} />
             {label}
         </span>
@@ -975,5 +1544,60 @@ function Menu({ label, open, onOpen, children }: { label: string; open: boolean;
             </button>
             {open && <div className="screen-menu fixed z-[70] mt-1 flex min-w-[240px] flex-col rounded-lg border border-line bg-panel p-1 shadow-2xl">{children}</div>}
         </div>
+    );
+}
+
+/** A panel from the bottom with the controls that don't fit a phone's bar. */
+function Sheet({ open, onClose, title, children }: { open: boolean; onClose: () => void; title: string; children: ReactNode }) {
+    const box = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        if (!open) return;
+        box.current?.focus({ preventScroll: true });
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                onClose();
+            }
+        };
+        document.addEventListener('keydown', onKey);
+
+        return () => document.removeEventListener('keydown', onKey);
+    }, [open, onClose]);
+
+    if (!open) return null;
+
+    return (
+        <div
+            className="absolute inset-0 z-[70] flex items-end justify-center bg-[rgba(4,5,6,0.6)]"
+            onClick={(e) => {
+                if (e.target === e.currentTarget) onClose();
+            }}
+        >
+            <div
+                ref={box}
+                role="dialog"
+                aria-modal="true"
+                aria-label={title}
+                tabIndex={-1}
+                className="screen-sheet flex max-h-[85%] w-full max-w-[520px] flex-col gap-4 overflow-y-auto overscroll-contain rounded-t-2xl border border-b-0 border-line-strong bg-panel px-4 pt-2 pb-[max(16px,env(safe-area-inset-bottom))] shadow-2xl outline-none"
+            >
+                <div className="relative flex items-center justify-center pt-1">
+                    <span aria-hidden="true" className="h-1 w-10 rounded-full bg-line-strong" />
+                    <button type="button" className="icon-btn absolute top-0 right-[-8px]" onClick={onClose} aria-label="Close" title="Close">
+                        <Icon name="close" size={16} />
+                    </button>
+                </div>
+                {children}
+            </div>
+        </div>
+    );
+}
+
+function SheetSection({ title, children }: { title: string; children: ReactNode }) {
+    return (
+        <section className="flex flex-col gap-2">
+            <h3 className="section-heading">{title}</h3>
+            {children}
+        </section>
     );
 }
