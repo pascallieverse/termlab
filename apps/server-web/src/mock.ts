@@ -42,6 +42,49 @@ const json = (data: unknown, status = 200) =>
 
 const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 21 21"><rect width="21" height="21" fill="#fff"/><path d="M1 1h7v7H1zM13 1h7v7h-7zM1 13h7v7H1z" fill="#000"/></svg>';
 
+const PROJECT_NAMES = ['api-server', 'web-app', 'docs', 'brightness', 'democms'];
+let mockLabels = [
+    { id: 1, name: 'Bug', color: 'red' },
+    { id: 2, name: 'Client work', color: 'blue' },
+    { id: 3, name: 'From GitHub', color: 'purple' },
+    { id: 4, name: 'Urgent', color: 'orange' },
+];
+
+/** An incoming webhook as the server answers it, from what the form sent. */
+function mockHook(h: Record<string, unknown>) {
+    const folderId = typeof h.folder_id === 'number' && h.folder_id > 0 ? h.folder_id : null;
+    const project = folderId ? (PROJECT_NAMES[folderId - 1] ?? 'api-server') : null;
+
+    return {
+        id: h.id as number,
+        name: (h.name as string) || 'Untitled',
+        machine_id: 1,
+        machine: 'studio-mac',
+        folder_id: folderId,
+        folder_path: project ? `/Users/me/Code/${project}` : null,
+        project,
+        project_missing: false,
+        project_template: (h.project_template as string) ?? '',
+        agent: (h.agent as string) ?? 'claude',
+        permission: (h.permission as string) ?? 'ask_first',
+        model: (h.model as string) || null,
+        title: (h.title as string) ?? '',
+        message: (h.message as string) ?? '{{body}}',
+        label_ids: (h.label_ids as number[]) ?? [],
+        labels_template: (h.labels_template as string) ?? '',
+        create_labels: !!h.create_labels,
+        notify: h.notify !== false,
+        enabled: h.enabled !== false,
+        last_call_at: (h.last_call_at as string | null) ?? null,
+        url_hint: `${location.origin}/api/hooks/th_x7Kq…`,
+    };
+}
+
+let mockHooks = [
+    mockHook({ id: 2, name: 'GitHub issues, any repo', folder_id: 0, project_template: '{{body.repository.name}}', agent: 'claude', permission: 'auto_edit', title: '#{{body.issue.number}} {{body.issue.title}}', message: 'Fix this issue:\n\n{{body.issue.body}}', label_ids: [3], labels_template: '{{body.labels}}', last_call_at: new Date(Date.now() - 300_000).toISOString() }),
+    mockHook({ id: 1, name: 'Phone shortcut', folder_id: 3, agent: 'claude', permission: 'ask_first', message: '{{body}}', label_ids: [4], last_call_at: new Date(Date.now() - 86_400_000).toISOString() }),
+];
+
 export function installMock(mode: string): void {
     signedIn = mode === '1';
     setupRequired = mode === 'setup';
@@ -53,6 +96,7 @@ export function installMock(mode: string): void {
             return realFetch(input, init);
         }
         const method = init?.method ?? 'GET';
+        const body: unknown = typeof init?.body === 'string' ? JSON.parse(init.body) : null;
         const path = url.split('?')[0];
         await new Promise((r) => setTimeout(r, 150));
 
@@ -86,10 +130,16 @@ export function installMock(mode: string): void {
             return json({ command_id: 'c1' }, 202);
         }
         if (path === '/api/pairing-codes') return json({ code: 'K7QX-2MPD', expires_at: new Date(Date.now() + 600_000).toISOString() });
+        if (/^\/api\/machines\/\d+\/labels$/.test(path) && method === 'POST') {
+            const { name, color } = body as { name: string; color: string };
+            const label = mockLabels.find((l) => l.name.toLowerCase() === name.toLowerCase()) ?? { id: Math.max(0, ...mockLabels.map((l) => l.id)) + 1, name, color };
+            if (!mockLabels.includes(label)) mockLabels = [...mockLabels, label];
+            return json({ label, labels: mockLabels });
+        }
         if (path.startsWith('/api/machines')) return json(method === 'DELETE' ? null : machines[0], method === 'DELETE' ? 204 : 200);
         if (path === '/api/webhooks' && method === 'GET')
             return json({
-                endpoints: [{ id: 1, url: 'https://hooks.slack.com/services/T000/B000/XXXX', description: 'Ping #agents', events: ['session.needs_you', 'approval.requested'], enabled: true, health: 'healthy', last_delivery_at: ago(120) }],
+                endpoints: [{ id: 1, url: 'https://hooks.slack.com/services/T000/B000/XXXX', description: 'Ping #agents', events: ['session.needs_you', 'approval.requested'], enabled: true, health: 'healthy', last_delivery_at: ago(120), method: 'POST', headers: [{ name: 'X-Team', value: 'agents' }], auth: { type: 'bearer', name: null, set: true } }],
                 events: [
                     { name: 'session.needs_you', description: 'A session waits for input' },
                     { name: 'approval.requested', description: 'An agent asks to run a command or edit a file' },
@@ -99,6 +149,28 @@ export function installMock(mode: string): void {
                     { name: 'machine.offline', description: 'A paired machine stopped reporting' },
                 ],
             });
+        if (path === '/api/incoming' && method === 'GET') return json({ hooks: mockHooks, labels: { 1: mockLabels } });
+        if (path === '/api/incoming' && method === 'POST') {
+            const hook = mockHook({ ...(body as object), id: Math.max(0, ...mockHooks.map((h) => h.id)) + 1 });
+            mockHooks = [hook, ...mockHooks];
+            return json(hook, 201);
+        }
+        if (path.startsWith('/api/incoming/') && method === 'PATCH') {
+            const id = Number(path.split('/')[3]);
+            mockHooks = mockHooks.map((h) => (h.id === id ? mockHook({ ...h, ...(body as object) }) : h));
+            return json(mockHooks.find((h) => h.id === id));
+        }
+        if (path.startsWith('/api/incoming/') && method === 'DELETE') {
+            mockHooks = mockHooks.filter((h) => h.id !== Number(path.split('/')[3]));
+            return json(null, 204);
+        }
+        if (path.startsWith('/api/incoming/') && (path.endsWith('/url') || path.endsWith('/roll'))) return json({ url: `${location.origin}/api/hooks/th_x7KqP2mVn8sLwR4tYb6cZ1dF0gHj` });
+        if (path.endsWith('/calls'))
+            return json([
+                { id: 3, ip: '140.82.115.4', status: 'started', session_id: 'a1', error: null, created_at: ago(300) },
+                { id: 2, ip: '140.82.115.4', status: 'offline', session_id: null, error: 'studio-mac is offline.', created_at: ago(7200) },
+                { id: 1, ip: '86.88.1.2', status: 'failed', session_id: null, error: 'The project folder is gone.', created_at: ago(86400) },
+            ]);
         if (path.endsWith('/deliveries'))
             return json([
                 { id: 1, event: 'approval.requested', response_code: '200', ok: true, pending: false, attempt: 1, duration_ms: 120, created_at: ago(120), delivered_at: ago(119) },

@@ -1,6 +1,7 @@
 //! `termlab-server`: your own server for Termlab. It gives you remote access to the
-//! sessions on your Termlab computers from a browser or phone, and sends signed webhooks
-//! when they change. One owner, one SQLite file, no third-party service in between.
+//! sessions on your Termlab computers from a browser or phone, sends signed webhooks
+//! when they change, and starts sessions when an incoming webhook is called. One owner,
+//! one SQLite file, no third-party service in between.
 //!
 //! See docs/self-hosting.md (running it) and docs/server-protocol.md (the API).
 
@@ -9,6 +10,7 @@ mod auth;
 mod config;
 mod db;
 mod hub;
+mod incoming;
 mod notify;
 mod screen;
 mod sessions;
@@ -48,6 +50,10 @@ pub struct App {
     pub pending_totp: Mutex<HashMap<i64, String>>,
     pub limiter: auth::LoginLimiter,
     pub push_throttle: notify::PushThrottle,
+    /// Calls per incoming webhook, for its rate limit.
+    pub hook_limiter: incoming::Limiter,
+    /// Label requests waiting for their computer's answer.
+    pub label_waits: incoming::LabelWaits,
     pub vapid: ES256KeyPair,
     /// For web push. Webhooks build their own client per delivery (pinned address).
     pub http: reqwest::Client,
@@ -120,6 +126,8 @@ pub fn build_app(cfg: Config) -> anyhow::Result<AppRef> {
         pending_totp: Mutex::new(HashMap::new()),
         limiter: auth::LoginLimiter::default(),
         push_throttle: notify::PushThrottle::default(),
+        hook_limiter: incoming::Limiter::default(),
+        label_waits: incoming::LabelWaits::default(),
         vapid,
         http,
     }))
@@ -127,6 +135,7 @@ pub fn build_app(cfg: Config) -> anyhow::Result<AppRef> {
 
 pub fn router(app: AppRef) -> Router {
     api::routes()
+        .merge(incoming::routes())
         .merge(ws::routes())
         .merge(screen::routes())
         .fallback(web::static_files)

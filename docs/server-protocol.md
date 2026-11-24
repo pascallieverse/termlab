@@ -1,7 +1,8 @@
 # Termlab server: API and protocol
 
 `termlab-server` is a self-hosted server that gives one person remote access to their own
-Termlab computers (browser and phone) and sends webhooks when sessions change. Everything
+Termlab computers (browser and phone), sends webhooks when sessions change, and starts
+sessions when an incoming webhook is called. Everything
 here is served by one binary (`crates/termlab-server`). The web UI (`apps/server-web`) is
 embedded in it and uses only the API below.
 
@@ -85,6 +86,31 @@ type PlanUsage = {
 type WebhookEndpoint = {
   id: number; url: string; description: string | null; events: string[];
   enabled: boolean; health: "healthy" | "failing" | "disabled"; last_delivery_at: string | null;
+  method: "POST" | "PUT" | "PATCH" | "GET";
+  headers: { name: string; value: string }[];
+  // name: the user (basic) or the header's name (header). The secret is never returned.
+  auth: { type: "none" | "bearer" | "basic" | "header"; name: string | null; set: boolean };
+};
+
+type IncomingHook = {
+  id: number; name: string; machine_id: number; machine: string | null;
+  // The fixed project; with project_template, the one used when the request's doesn't
+  // match. null: none (only with project_template).
+  folder_id: number | null; folder_path: string | null; project: string | null;
+  project_missing: boolean;   // that folder is gone from the computer: calls needing it fail
+  project_template: string;   // "" or a template naming the project, e.g. "{{body.repo}}"
+  label_ids: number[];        // labels every session gets (the computer's label ids)
+  labels_template: string;    // "" or label names from the request
+  create_labels: boolean;     // make labels the request names that don't exist yet (grey)
+  agent: string; permission: "ask_first" | "auto_edit" | "full_auto"; model: string | null;
+  title: string; message: string;   // templates, see "Incoming webhooks"
+  notify: boolean; enabled: boolean; last_call_at: string | null;
+  url_hint: string;           // the URL's start; POST …/url for all of it
+};
+
+type IncomingCall = {
+  id: number; ip: string | null; session_id: string | null; error: string | null; created_at: string;
+  status: "pending" | "started" | "failed" | "offline" | "disabled" | "no_answer";
 };
 
 type WebhookDelivery = {
@@ -140,8 +166,8 @@ Each of these is written to the audit log before the command goes to the machine
 | Request | Answer |
 |---|---|
 | `GET /api/webhooks` | `{ endpoints: WebhookEndpoint[], events: { name, description }[] }` |
-| `POST /api/webhooks { url, description?, events[] }` | `WebhookEndpoint` (422 `{message}` on a bad URL) |
-| `PATCH /api/webhooks/{id} { url?, description?, events?, enabled? }` | `WebhookEndpoint` |
+| `POST /api/webhooks { url, description?, events[], method?, headers?, auth? }` | `WebhookEndpoint` (422 `{message}` on a bad URL, header or auth) |
+| `PATCH /api/webhooks/{id} { url?, description?, events?, enabled?, method?, headers?, auth? }` | `WebhookEndpoint`. Fields left out stay. |
 | `DELETE /api/webhooks/{id}` | 204 |
 | `POST /api/webhooks/{id}/secret` | `{ secret }` (shown on request only) |
 | `POST /api/webhooks/{id}/roll` | `{ secret }` |
@@ -152,12 +178,57 @@ Each of these is written to the audit log before the command goes to the machine
 Events: `session.needs_you`, `approval.requested`, `session.done`, `session.error`,
 `session.started`, `machine.offline`, plus `webhook.test`.
 
-Deliveries are `POST` with JSON
+Deliveries use the endpoint's method (`POST` unless set) with JSON
 `{ id, event, created_at, program: "termlab", machine, project?, agent?, reason?, session?, approval? }`
 and headers `X-Termlab-Event`, `X-Termlab-Delivery` (the event id) and
-`X-Termlab-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>`.
+`X-Termlab-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>`. A `GET` has no
+body (signed as an empty one). `headers` (up to 20) are added as given; `Host`,
+`Content-Type`, `Content-Length`, `User-Agent`, `Connection`, `Transfer-Encoding` and
+`X-Termlab-*` can't be set. `auth` is `{ type, name?, secret? }`: `bearer` sends
+`Authorization: Bearer <secret>`, `basic` sends basic auth for `name`, `header` sends the
+header `name` with the secret as its value. On PATCH, a blank secret keeps the saved one
+when the type stays the same.
 Private and loopback addresses are refused unless the server runs with
 `--allow-private-webhooks`.
+
+### Incoming webhooks
+
+A secret URL that starts a session when it's called.
+
+| Request | Answer |
+|---|---|
+| `GET /api/incoming` | `{ hooks: IncomingHook[], labels: { "<machine id>": { id, name, color }[] } }` |
+| `POST /api/incoming { name, machine_id, folder_id, agent, permission?, model?, title?, message?, notify?, enabled?, project_template?, label_ids?, labels_template?, create_labels? }` | 201 `IncomingHook`; 422 for an unknown computer, project or agent. `folder_id` 0: no fixed project (needs `project_template`). `message` defaults to `{{body}}`. |
+| `PATCH /api/incoming/{id} { …the same, all optional }` | `IncomingHook`. Fields left out stay. |
+| `DELETE /api/incoming/{id}` | 204 |
+| `POST /api/incoming/{id}/url` | `{ url }` |
+| `POST /api/incoming/{id}/roll` | `{ url }`: a new URL; the old one stops working. |
+| `POST /api/machines/{id}/labels { name, color }` | `{ label, labels }`: a label made on that computer (Termlab keeps labels), or the one it has with that name in any capitals. `color`: red, orange, yellow, green, cyan, blue, purple, pink or gray; names up to 32 characters. 409 offline, 422 refused, 504 when the computer doesn't answer within 8 s (Termlab before 0.2.14). |
+| `GET /api/incoming/{id}/calls` | `IncomingCall[]` (newest 50; 100 are kept). `no_answer`: still pending after 2 minutes. |
+
+The URL is `<public url>/api/hooks/<token>`. It takes `POST` from anyone holding it (no
+cookie, no `X-Termlab-Request`; body up to 1 MB) and answers:
+
+- 202 `{ request_id }`: sent to the computer; the call log shows whether it started.
+- 404 for an unknown URL, 403 when the hook is turned off, 422 when its project or agent
+  is gone from the computer (or the request names no project that exists and there's no
+  fallback), 409 when the computer is offline, 429 after 20 calls in a minute.
+
+The hook's `message` (the first message) and `title` are templates. `{{body}}` is the raw
+body; `{{body.a.b}}` a field of a JSON or form (`application/x-www-form-urlencoded`) body,
+with `.0` for a list item (objects and lists come out as JSON); `{{query.x}}` a query
+parameter; `{{headers.x}}` a request header. Missing values are empty; anything else in
+braces stays as written. The machine gets `session.start` with `request_id` `hook-<uuid>`,
+the filled-in `message` (up to 20,000 characters) and `title` (one line, up to 200; Termlab
+0.2.14+, older versions name the session themselves). Each call is audited as
+`session.start` with the caller's address.
+
+With a `project_template`, the filled-in value picks the project: its full path, or its
+name or folder name in any capitals; otherwise the fixed project is the fallback. The
+`labels_template` gives label names, as a JSON list (`["bug", "api"]`, or objects with a
+`name`) or separated by commas or lines; at most 20, each cut to 32 characters. Termlab
+(0.2.14+) puts the hook's `label_ids` and the labels with those names on the new session,
+and makes missing ones (grey) when `create_labels` is set; older versions ignore labels.
 
 ### Account
 
@@ -293,6 +364,10 @@ Machine → server:
 - `{ "type": "usage", "usage": PlanUsage[] }`: plan usage, after connecting and when it changes.
 - `{ "type": "projects", "projects": […], "agents": […] }`: the project folders in sidebar order
   and the installed agents, after connecting and when folders change.
+- `{ "type": "labels", "labels": { id, name, color }[] }`: the session labels made in the app,
+  after connecting and when they change. (Termlab 0.2.14+.)
+- `{ "type": "label.created", "request_id": "…", "label": { id, name, color }, "labels": […] }`
+  or `{ …, "error": "…" }`: the answer to `label.create`.
 - `{ "type": "started", "request_id": "…", "id": "…" }` / `{ "type": "start_failed", "request_id": "…", "error": "…" }`
 - `{ "type": "output", "id": "…", "data": "<base64>", "snapshot": bool, "cols": n|null, "rows": n|null }`
 
@@ -303,9 +378,13 @@ Server → machine:
 - `{ "type": "resize", "id": "…", "cols": n, "rows": n }` / `{ …, "release": true }`: a viewer's
   size for the pty. Termlab gives the app's size back on release, when the last viewer stops
   watching, or when the connection drops, unless the app resized it meanwhile. (0.2.9+)
-- `{ "type": "session.start", "request_id": "…", "folder_id": 1, "agent": "claude", "permission": "ask_first", "model": null, "message": null }`:
-  a new session (never resume or fork), in a folder Termlab knows.
+- `{ "type": "session.start", "request_id": "…", "folder_id": 1, "agent": "claude", "permission": "ask_first", "model": null, "message": null, "notify": true, "title": null }`:
+  a new session (never resume or fork), in a folder Termlab knows. From incoming webhooks
+  (Termlab 0.2.14+): `title` names it instead of Termlab's own title; `labels` (ids),
+  `label_names` and `create_labels` put labels on it.
 - `{ "type": "project.move", "folder_id": 2, "before": 1 }`: reorder (`before` null: last).
+- `{ "type": "label.create", "request_id": "…", "name": "…", "color": "green" }`: make a session
+  label (from an incoming webhook's form); answered with `label.created`. (Termlab 0.2.14+.)
 - `{ "type": "notes.save", "path": "…", "text": "…" }`: notes edited in the browser, for a
   project folder Termlab knows; it answers with `notes`.
 - `{ "type": "screen.open", "sid": "…", "viewer": "Safari on iPhone at 203.0.113.5" }`: start

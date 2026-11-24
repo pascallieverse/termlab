@@ -262,7 +262,10 @@ pub fn user_agent(headers: &HeaderMap) -> String {
 /// bearer token, not cookies, so it doesn't need it.
 /// Calls Termlab makes (bearer token or pairing code, no cookie) don't carry the header.
 fn csrf_exempt(path: &str) -> bool {
-    path == "/api/pair" || path == "/api/machine" || path.starts_with("/api/machine/")
+    path == "/api/pair"
+        || path == "/api/machine"
+        || path.starts_with("/api/machine/")
+        || crate::incoming::csrf_exempt(path)
 }
 
 pub async fn csrf_guard(

@@ -299,7 +299,19 @@ fn handle_machine(app: &AppRef, machine: i64, text: &str) {
             out["type"] = json!("projects.updated");
             app.hub.broadcast(&out);
         }
+        "labels" => crate::incoming::set_labels(app, machine, &msg["labels"]),
+        "label.created" => crate::incoming::label_created(app, machine, &msg),
         "started" | "start_failed" => {
+            if let Some(rid) = msg["request_id"].as_str() {
+                crate::incoming::start_result(
+                    app,
+                    rid,
+                    msg["id"]
+                        .as_str()
+                        .filter(|s| uuid::Uuid::parse_str(s).is_ok()),
+                    msg["error"].as_str(),
+                );
+            }
             // Tells the browser that asked which session it got (or why not).
             app.hub.broadcast(&json!({
                 "type": "session.start_result",

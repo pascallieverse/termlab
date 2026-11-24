@@ -197,20 +197,98 @@ pub fn signature(secret: &str, body: &str, t: i64) -> String {
     format!("t={t},v1={}", hex::encode(mac.finalize().into_bytes()))
 }
 
+/// How an endpoint wants its requests: method, extra headers and authentication.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sending {
+    pub method: String,
+    pub headers: Vec<(String, String)>,
+    /// `none`, `bearer` (secret), `basic` (name: user, secret: password) or `header`
+    /// (name: header name, secret: its value).
+    pub auth_type: String,
+    pub auth_name: Option<String>,
+    pub auth_secret: Option<String>,
+}
+
+pub const METHODS: [&str; 4] = ["POST", "PUT", "PATCH", "GET"];
+pub const AUTH_TYPES: [&str; 4] = ["none", "bearer", "basic", "header"];
+
+/// Headers an endpoint can't set: the transport's own, and the ones Termlab signs with.
+pub fn reserved_header(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        "host"
+            | "content-length"
+            | "content-type"
+            | "transfer-encoding"
+            | "connection"
+            | "user-agent"
+    ) || n.starts_with("x-termlab-")
+}
+
+impl Sending {
+    fn request(&self, client: &reqwest::Client, url: &str, body: &str) -> reqwest::RequestBuilder {
+        let method =
+            reqwest::Method::from_bytes(self.method.as_bytes()).unwrap_or(reqwest::Method::POST);
+        let get = method == reqwest::Method::GET;
+        let mut req = client.request(method, url);
+        for (k, v) in &self.headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        let secret = self.auth_secret.as_deref().unwrap_or_default();
+        req = match (self.auth_type.as_str(), self.auth_name.as_deref()) {
+            ("bearer", _) => req.bearer_auth(secret),
+            ("basic", Some(user)) => req.basic_auth(user, Some(secret)),
+            ("header", Some(name)) => req.header(name, secret),
+            _ => req,
+        };
+        if get {
+            // No body: the event is in the headers.
+            req
+        } else {
+            req.header("Content-Type", "application/json")
+                .body(body.to_string())
+        }
+    }
+}
+
 async fn deliver(app: AppRef, delivery: i64) {
     for attempt in 1..=5u32 {
-        let row: Option<(String, String, String, String, String, bool)> = app
+        let row: Option<(String, String, String, String, String, bool, Sending)> = app
             .db
             .with(|c| {
                 c.query_row(
-                    "select e.url, e.secret, d.event, d.event_id, d.payload, e.enabled
+                    "select e.url, e.secret, d.event, d.event_id, d.payload, e.enabled,
+                            e.method, e.headers, e.auth_type, e.auth_name, e.auth_secret
                      from webhook_deliveries d join webhook_endpoints e on e.id = d.endpoint_id where d.id = ?1",
                     [delivery],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get::<_, i64>(5)? != 0)),
+                    |r| {
+                        let headers: Vec<(String, String)> =
+                            serde_json::from_str::<Vec<Value>>(&r.get::<_, String>(7)?)
+                                .unwrap_or_default()
+                                .iter()
+                                .filter_map(|h| Some((h["name"].as_str()?.to_string(), h["value"].as_str()?.to_string())))
+                                .collect();
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get::<_, i64>(5)? != 0,
+                            Sending {
+                                method: r.get(6)?,
+                                headers,
+                                auth_type: r.get(8)?,
+                                auth_name: r.get(9)?,
+                                auth_secret: r.get(10)?,
+                            },
+                        ))
+                    },
                 )
             })
             .ok();
-        let Some((url, secret, event, event_id, body, enabled)) = row else {
+        let Some((url, secret, event, event_id, body, enabled, sending)) = row else {
             return;
         };
         if !enabled {
@@ -224,6 +302,12 @@ async fn deliver(app: AppRef, delivery: i64) {
                 return;
             }
         };
+        // A GET has no body, so its signature covers an empty one.
+        let signed = if sending.method == "GET" {
+            ""
+        } else {
+            body.as_str()
+        };
         let started = Instant::now();
         let result = async {
             let client = reqwest::Client::builder()
@@ -234,13 +318,14 @@ async fn deliver(app: AppRef, delivery: i64) {
                 // Connect to the address that was checked, so DNS can't change in between.
                 .resolve(&target.0, target.1)
                 .build()?;
-            client
-                .post(&url)
-                .header("Content-Type", "application/json")
+            sending
+                .request(&client, &url, &body)
                 .header("X-Termlab-Event", &event)
                 .header("X-Termlab-Delivery", &event_id)
-                .header("X-Termlab-Signature", signature(&secret, &body, unix_now()))
-                .body(body.clone())
+                .header(
+                    "X-Termlab-Signature",
+                    signature(&secret, signed, unix_now()),
+                )
                 .send()
                 .await
         }

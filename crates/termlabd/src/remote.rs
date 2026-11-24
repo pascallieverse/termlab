@@ -37,7 +37,7 @@ use termlab_core::model::{
 };
 use termlab_core::pty::PtyEvent;
 use termlab_core::remote::{PairRequest, RemoteControl, RemoteFuture, RemoteState, RemoteStatus};
-use termlab_core::{CoreEvent, DataDirs, StartRequest, Termlab, git, notes, screen};
+use termlab_core::{CoreEvent, DataDirs, StartRequest, Termlab, git, labels, notes, screen};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
@@ -282,6 +282,7 @@ impl Bridge {
         self.full_sync(&mut sink, &mut synced).await?;
         let mut notes_at = self.send_notes(&mut sink).await?;
         self.send_projects(&mut sink).await?;
+        let mut labels_at = self.send_labels(&mut sink).await?;
         let mut usage_sent = self.send_usage(&mut sink, None).await?;
         self.set_state(RemoteState::Connected, None);
         self.set_counts(synced.len(), 0);
@@ -332,6 +333,7 @@ impl Bridge {
                         "project.move" => self.move_project(&m),
                         "screen.open" => self.open_screen(cfg, &m, out_tx.clone()),
                         "session.start" => self.start_session(&m, out_tx.clone()),
+                        "label.create" => self.create_label(&m, out_tx.clone()),
                         "notes.save" => {
                             if let Err(e) = self.save_notes(&m).await {
                                 tracing::warn!(error = %e, "remote: notes not saved");
@@ -398,6 +400,9 @@ impl Bridge {
                 _ = notes_tick.tick() => {
                     if notes::modified(&self.data_dir) != notes_at {
                         notes_at = self.send_notes(&mut sink).await?;
+                    }
+                    if labels_modified(&self.data_dir) != labels_at {
+                        labels_at = self.send_labels(&mut sink).await?;
                     }
                     usage_sent = self.send_usage(&mut sink, Some(usage_sent)).await?;
                     let caps = self.screen_caps();
@@ -573,6 +578,25 @@ impl Bridge {
     }
 
     /// The projects in the sidebar's order, and the agents installed here.
+    /// The session labels made in the app (`{ id, name, color }`), so the server can offer
+    /// them for incoming webhooks. Returns the file's time, to send again when it changes.
+    async fn send_labels(&self, sink: &mut WsSink) -> Result<Option<std::time::SystemTime>, Fail> {
+        let dir = self.data_dir.clone();
+        let read =
+            tokio::task::spawn_blocking(move || (labels_modified(&dir), labels::read(&dir))).await;
+        match read {
+            Ok((at, Ok(book))) => {
+                send(sink, json!({ "type": "labels", "labels": book.labels })).await?;
+                Ok(at)
+            }
+            Ok((at, Err(e))) => {
+                tracing::warn!(error = %e, "remote: labels not sent");
+                Ok(at)
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
     async fn send_projects(&self, sink: &mut WsSink) -> Result<(), Fail> {
         let tl = self.tl.clone();
         let (projects, agents) = tokio::task::spawn_blocking(move || {
@@ -631,6 +655,27 @@ impl Bridge {
     /// A session started from the browser: a new one only (no resume or fork), in a project
     /// folder Termlab knows. Answers `started` (or `start_failed`) with the request's id, so
     /// the browser can open it.
+    /// Makes a label asked for in the browser (for an incoming webhook), and answers with
+    /// it and every label.
+    fn create_label(&self, m: &Value, out: mpsc::Sender<String>) {
+        let request_id = clip(m["request_id"].as_str().unwrap_or_default(), 64);
+        let name = m["name"].as_str().unwrap_or_default().to_string();
+        let color = m["color"].as_str().unwrap_or("gray").to_string();
+        let dir = self.data_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let frame = match labels::save_label(&dir, None, &name, &color) {
+                Ok(saved) => json!({
+                    "type": "label.created", "request_id": request_id,
+                    "label": saved.label, "labels": saved.book.labels,
+                }),
+                Err(e) => {
+                    json!({ "type": "label.created", "request_id": request_id, "error": clip(&e, 300) })
+                }
+            };
+            let _ = out.blocking_send(frame.to_string());
+        });
+    }
+
     fn start_session(&self, m: &Value, out: mpsc::Sender<String>) {
         let request_id = clip(m["request_id"].as_str().unwrap_or_default(), 64);
         let folder_id = m["folder_id"].as_i64();
@@ -648,6 +693,33 @@ impl Bridge {
             .filter(|s| !s.trim().is_empty())
             .map(|s| clip(s, 20_000));
         let notify = m["notify"].as_bool().unwrap_or(true);
+        // Set by incoming webhooks (termlab-server 0.2.14+).
+        let title = m["title"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| clip(s, 200));
+        // Labels for the new session (incoming webhooks): ids, and names to find or make.
+        let label_ids: Vec<labels::LabelId> = m["labels"]
+            .as_array()
+            .map(|l| {
+                l.iter()
+                    .filter_map(|x| x.as_u64()?.try_into().ok())
+                    .take(50)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let label_names: Vec<String> = m["label_names"]
+            .as_array()
+            .map(|l| {
+                l.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .take(20)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let create_labels = m["create_labels"].as_bool().unwrap_or(false);
+        let data_dir = self.data_dir.clone();
         let tl = self.tl.clone();
         tokio::task::spawn_blocking(move || {
             let result = (|| {
@@ -664,7 +736,7 @@ impl Bridge {
                     first_message,
                     size: Some(TermSize::default()),
                     notify,
-                    title: None,
+                    title,
                     mode: Default::default(),
                 };
                 tl.start_session(&req, None).map_err(|e| e.to_string())
@@ -672,6 +744,12 @@ impl Bridge {
             let frame = match result {
                 Ok(view) => {
                     tracing::info!(id = %view.record.id, "remote: session started");
+                    let id = view.record.id.to_string();
+                    if let Err(e) =
+                        apply_labels(&data_dir, &id, &label_ids, &label_names, create_labels)
+                    {
+                        tracing::warn!(error = %e, "remote: labels not applied");
+                    }
                     json!({ "type": "started", "request_id": request_id, "id": view.record.id.to_string() })
                 }
                 Err(e) => {
@@ -1294,9 +1372,74 @@ fn os_description() -> String {
     format!("{os} · {arch}")
 }
 
+fn labels_modified(dir: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(labels::path(dir))
+        .and_then(|m| m.modified())
+        .ok()
+}
+
+/// Puts labels on a session: these ids, and the labels with these names (any capitals).
+/// A name without a label is made (grey) when `create` is set, and skipped otherwise.
+fn apply_labels(
+    dir: &Path,
+    session: &str,
+    ids: &[labels::LabelId],
+    names: &[String],
+    create: bool,
+) -> Result<(), String> {
+    if ids.is_empty() && names.is_empty() {
+        return Ok(());
+    }
+    let mut book = labels::read(dir)?;
+    let mut want = ids.to_vec();
+    for name in names {
+        let lower = name.to_lowercase();
+        if let Some(l) = book.labels.iter().find(|l| l.name.to_lowercase() == lower) {
+            want.push(l.id);
+        } else if create {
+            match labels::save_label(dir, None, name, "gray") {
+                Ok(saved) => {
+                    want.push(saved.label.id);
+                    book = saved.book;
+                }
+                Err(e) => tracing::warn!(error = %e, name, "remote: label not made"),
+            }
+        }
+    }
+    if want.is_empty() {
+        return Ok(());
+    }
+    labels::set_session_labels(dir, session, &want).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webhook_labels_are_found_by_name_and_made_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let bug = labels::save_label(d, None, "Bug", "red").unwrap().label.id;
+        let api = labels::save_label(d, None, "API", "blue").unwrap().label.id;
+
+        apply_labels(d, "s1", &[api], &["bug".into(), "Unknown".into()], false).unwrap();
+        let book = labels::read(d).unwrap();
+        assert_eq!(book.sessions["s1"], [bug, api]);
+        assert_eq!(book.labels.len(), 2);
+
+        apply_labels(d, "s2", &[], &["Unknown".into()], true).unwrap();
+        let book = labels::read(d).unwrap();
+        let made = book.labels.iter().find(|l| l.name == "Unknown").unwrap();
+        assert_eq!(
+            (made.color.as_str(), &book.sessions["s2"][..]),
+            ("gray", &[made.id][..])
+        );
+
+        // Nothing asked: the file isn't touched.
+        apply_labels(d, "s3", &[], &[], true).unwrap();
+        assert!(!labels::read(d).unwrap().sessions.contains_key("s3"));
+    }
 
     #[test]
     fn websocket_urls_follow_the_server_scheme() {

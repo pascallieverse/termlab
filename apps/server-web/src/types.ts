@@ -110,6 +110,11 @@ export type PlanUsage = {
     note?: string | null;
 };
 
+export type WebhookMethod = 'POST' | 'PUT' | 'PATCH' | 'GET';
+
+/** none, a bearer token, basic auth (name: user) or a header of your own (name: header). */
+export type WebhookAuthType = 'none' | 'bearer' | 'basic' | 'header';
+
 export type WebhookEndpoint = {
     id: number;
     url: string;
@@ -118,6 +123,55 @@ export type WebhookEndpoint = {
     enabled: boolean;
     health: 'healthy' | 'failing' | 'disabled';
     last_delivery_at: string | null;
+    method: WebhookMethod;
+    headers: { name: string; value: string }[];
+    /** The secret never comes back; `set` says one is saved. */
+    auth: { type: WebhookAuthType; name: string | null; set: boolean };
+};
+
+/** A session label made in Termlab on a computer (Termlab 0.2.14+ reports them). */
+export type SessionLabel = { id: number; name: string; color: string };
+
+/** An incoming webhook: a secret URL that starts a session when it's called. */
+export type IncomingHook = {
+    id: number;
+    name: string;
+    machine_id: number;
+    machine: string | null;
+    /** The fixed project; with a project template, the one used when the request's doesn't match. Null: none. */
+    folder_id: number | null;
+    folder_path: string | null;
+    project: string | null;
+    /** That project folder is gone from the computer: calls that need it fail until it's edited. */
+    project_missing: boolean;
+    /** Picks the project from the request (a name, folder name or path); blank: always the fixed one. */
+    project_template: string;
+    /** Labels every session gets: ids of the computer's labels. */
+    label_ids: number[];
+    /** Label names from the request: a JSON list, or separated by commas. */
+    labels_template: string;
+    /** Make labels the request names that don't exist yet (grey). */
+    create_labels: boolean;
+    agent: string;
+    permission: PermissionPreset;
+    model: string | null;
+    /** Templates: {{body}}, {{body.a.b}}, {{query.x}}, {{headers.x}}. */
+    title: string;
+    message: string;
+    notify: boolean;
+    enabled: boolean;
+    last_call_at: string | null;
+    /** The URL's start; the full URL is fetched on request. */
+    url_hint: string;
+};
+
+export type IncomingCall = {
+    id: number;
+    ip: string | null;
+    status: 'pending' | 'started' | 'failed' | 'offline' | 'disabled' | 'no_answer';
+    session_id: string | null;
+    error: string | null;
+    created_at: string;
 };
 
 export type WebhookDelivery = {

@@ -49,7 +49,7 @@ function Input(props: React.InputHTMLAttributes<HTMLInputElement> & { label: str
 // (/settings/<id>). On phones /settings is the list and each section opens on its own.
 const SECTIONS = [
     { id: 'machines', label: 'Machines', icon: 'machines', desc: 'Computers running Termlab that are linked to this server.' },
-    { id: 'webhooks', label: 'Webhooks', icon: 'webhooks', desc: 'Signed POST requests when your Termlab sessions change.' },
+    { id: 'webhooks', label: 'Webhooks', icon: 'webhooks', desc: 'Start sessions from incoming requests, and send requests when sessions change.' },
     { id: 'notifications', label: 'Notifications', icon: 'bell', desc: 'A notification on your phone or computer when a session needs you or fails.' },
     { id: 'appearance', label: 'Appearance', icon: 'palette', desc: 'The theme of this page and its terminals, and the terminal text, in this browser.' },
     { id: 'account', label: 'Account', icon: 'account', desc: 'Password, authenticator app and the devices signed in.' },
@@ -393,9 +393,15 @@ const ACTION_LABEL: Record<string, string> = {
     'session.message': 'Sent a message',
     'session.stop': 'Stopped a session',
     'session.hold': 'Put a session on hold',
+    'session.start': 'Started a session',
     'webhook.created': 'Added a webhook',
     'webhook.deleted': 'Deleted a webhook',
     'webhook.secret_rolled': 'Rolled a webhook secret',
+    'webhook.updated': 'Changed a webhook',
+    'incoming.created': 'Added an incoming webhook',
+    'incoming.updated': 'Changed an incoming webhook',
+    'incoming.deleted': 'Deleted an incoming webhook',
+    'incoming.url_rolled': 'Made a new incoming webhook URL',
     'push.device_added': 'Turned on notifications for a device',
 };
 

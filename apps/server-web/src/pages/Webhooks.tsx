@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { Button } from '@/components/el/button';
 import { Panel } from '@/components/el/panel';
+import { Segmented } from '@/components/el/segmented';
 import { Pill, type Tone } from '@/components/el/status';
 import { useToast } from '@/components/el/toast';
 import { HeadActions } from '@/layouts/SettingsLayout';
 import { api, errorMessage } from '@/lib/api';
 import { timeAgo } from '@/lib/format';
 import { cn } from '@/lib/utils';
-import type { WebhookDelivery, WebhookEndpoint } from '@/types';
+import type { WebhookAuthType, WebhookDelivery, WebhookEndpoint, WebhookMethod } from '@/types';
+import { IncomingWebhooks } from './IncomingWebhooks';
+import { Field, inputClass, selectClass, useScrollIntoView } from './webhook-ui';
 
 type EventOption = { name: string; description: string };
 
@@ -19,16 +22,62 @@ const HEALTH: Record<WebhookEndpoint['health'], { label: string; tone: Tone }> =
     disabled: { label: 'Disabled', tone: 'off' },
 };
 
-const inputClass = 'min-h-11 rounded-[9px] border border-line-strong bg-bg px-3 text-ink';
+const METHODS: WebhookMethod[] = ['POST', 'PUT', 'PATCH', 'GET'];
 
-/** Settings › Webhooks. */
+const AUTH: { value: WebhookAuthType; label: string }[] = [
+    { value: 'none', label: 'None' },
+    { value: 'bearer', label: 'Bearer token' },
+    { value: 'basic', label: 'Basic auth' },
+    { value: 'header', label: 'API key header' },
+];
+
+type Tab = 'incoming' | 'outgoing';
+const TAB_KEY = 'termlab.webhooksTab';
+
+/** Settings › Webhooks: incoming (start sessions) and outgoing (session events). */
 export function WebhooksSection() {
+    const [tab, setTab] = useState<Tab>(() => (localStorage.getItem(TAB_KEY) === 'outgoing' ? 'outgoing' : 'incoming'));
+
+    return (
+        <>
+            <div className="flex flex-col gap-2">
+                <Segmented<Tab>
+                    label="Webhook direction"
+                    options={[
+                        { value: 'incoming', label: 'Incoming' },
+                        { value: 'outgoing', label: 'Outgoing' },
+                    ]}
+                    value={tab}
+                    onChange={(t) => {
+                        setTab(t);
+                        try {
+                            localStorage.setItem(TAB_KEY, t);
+                        } catch {
+                            // Only a convenience.
+                        }
+                    }}
+                    className="self-start"
+                />
+                <p className="m-0 text-sm text-dim">
+                    {tab === 'incoming'
+                        ? 'A URL for other services to call: each call starts a session on one of your computers.'
+                        : 'Requests this server sends to your URLs when sessions change, signed with a secret.'}
+                </p>
+            </div>
+            {tab === 'incoming' ? <IncomingWebhooks /> : <OutgoingWebhooks />}
+        </>
+    );
+}
+
+function OutgoingWebhooks() {
     const toast = useToast();
     const [endpoints, setEndpoints] = useState<WebhookEndpoint[] | null>(null);
     const [events, setEvents] = useState<EventOption[]>([]);
     const [selectedId, setSelectedId] = useState<number | null>(null);
     const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([]);
     const [showForm, setShowForm] = useState(false);
+    const [editing, setEditing] = useState<WebhookEndpoint | null>(null);
+    const formOpen = showForm || editing !== null;
 
     const load = useCallback(async () => {
         try {
@@ -76,21 +125,35 @@ export function WebhooksSection() {
     return (
         <>
             <HeadActions>
-                <Button aria-expanded={showForm} aria-controls="new-endpoint" onClick={() => setShowForm(!showForm)}>
-                    {showForm ? 'Close form' : 'Add endpoint'}
+                <Button
+                    aria-expanded={formOpen}
+                    aria-controls="new-endpoint"
+                    onClick={() => {
+                        setEditing(null);
+                        setShowForm(!formOpen);
+                    }}
+                >
+                    {formOpen ? 'Close form' : 'Add endpoint'}
                 </Button>
             </HeadActions>
 
-            {showForm && (
-                <NewEndpointForm
+            {formOpen && (
+                <EndpointForm
+                    key={editing?.id ?? 'new'}
+                    initial={editing}
                     events={events}
                     canCancel={(endpoints?.length ?? 0) > 0}
-                    onCancel={() => setShowForm(false)}
-                    onSaved={async (endpoint) => {
+                    onCancel={() => {
                         setShowForm(false);
+                        setEditing(null);
+                    }}
+                    onSaved={async (endpoint) => {
+                        const created = editing === null;
+                        setShowForm(false);
+                        setEditing(null);
                         await load();
                         setSelectedId(endpoint.id);
-                        toast.success('Endpoint added. Its signing secret is ready.');
+                        toast.success(created ? 'Endpoint added. Its signing secret is ready.' : 'Changes saved.');
                     }}
                 />
             )}
@@ -121,7 +184,10 @@ export function WebhooksSection() {
                                     onClick={() => setSelectedId(ep.id)}
                                     className="flex min-h-11 min-w-0 flex-[1_1_360px] cursor-pointer flex-col gap-1 border-0 bg-transparent p-0 text-left text-inherit"
                                 >
-                                    <span className="font-mono text-sm [overflow-wrap:anywhere]">{ep.url}</span>
+                                    <span className="font-mono text-sm [overflow-wrap:anywhere]">
+                                        <span className="mr-2 text-[12px] font-semibold text-amber-soft">{ep.method}</span>
+                                        {ep.url}
+                                    </span>
                                     <span className="text-[13px] text-dim">
                                         {ep.description ? `${ep.description} · ` : ''}
                                         {events.length > 0 && ep.events.length === events.length
@@ -143,7 +209,15 @@ export function WebhooksSection() {
 
             {selected && (
                 <div className="grid grid-cols-[repeat(auto-fit,minmax(min(320px,100%),1fr))] items-start gap-5">
-                    <SecretPanel key={selected.id} endpoint={selected} onChanged={refresh} />
+                    <SecretPanel
+                        key={selected.id}
+                        endpoint={selected}
+                        onChanged={refresh}
+                        onEdit={() => {
+                            setShowForm(false);
+                            setEditing(selected);
+                        }}
+                    />
                     <Deliveries
                         deliveries={deliveries}
                         onRefresh={() => void refresh()}
@@ -163,25 +237,39 @@ export function WebhooksSection() {
     );
 }
 
-function NewEndpointForm({
+function EndpointForm({
+    initial,
     events,
     canCancel,
     onCancel,
     onSaved,
 }: {
+    initial: WebhookEndpoint | null;
     events: EventOption[];
     canCancel: boolean;
     onCancel: () => void;
     onSaved: (endpoint: WebhookEndpoint) => void | Promise<void>;
 }) {
-    const [url, setUrl] = useState('');
-    const [description, setDescription] = useState('');
-    const [chosen, setChosen] = useState<string[]>(DEFAULT_EVENTS);
+    const [url, setUrl] = useState(initial?.url ?? '');
+    const [method, setMethod] = useState<WebhookMethod>(initial?.method ?? 'POST');
+    const [description, setDescription] = useState(initial?.description ?? '');
+    const [chosen, setChosen] = useState<string[]>(initial?.events ?? DEFAULT_EVENTS);
+    const [headers, setHeaders] = useState<{ name: string; value: string }[]>(initial?.headers ?? []);
+    const [authType, setAuthType] = useState<WebhookAuthType>(initial?.auth.type ?? 'none');
+    const [authName, setAuthName] = useState(initial?.auth.name ?? '');
+    const [authSecret, setAuthSecret] = useState('');
     const [error, setError] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
+    // Editing with the same kind of authentication: a blank secret keeps the saved one.
+    const keeps = !!initial?.auth.set && initial.auth.type === authType;
+    const box = useScrollIntoView<HTMLElement>();
 
     function toggle(name: string) {
         setChosen((list) => (list.includes(name) ? list.filter((e) => e !== name) : [...list, name]));
+    }
+
+    function setHeader(i: number, patch: Partial<{ name: string; value: string }>) {
+        setHeaders((list) => list.map((h, j) => (j === i ? { ...h, ...patch } : h)));
     }
 
     async function submit(e: FormEvent) {
@@ -193,12 +281,18 @@ function NewEndpointForm({
         }
         setBusy(true);
         setError(null);
+        const body = {
+            url: url.trim(),
+            method,
+            description: description.trim(),
+            events: chosen,
+            headers: headers.filter((h) => h.name.trim() || h.value.trim()),
+            auth: { type: authType, name: authName.trim() || null, secret: authSecret || null },
+        };
         try {
-            const endpoint = await api.post<WebhookEndpoint>('/api/webhooks', {
-                url: url.trim(),
-                description: description.trim() || null,
-                events: chosen,
-            });
+            const endpoint = initial
+                ? await api.patch<WebhookEndpoint>(`/api/webhooks/${initial.id}`, body)
+                : await api.post<WebhookEndpoint>('/api/webhooks', body);
             await onSaved(endpoint);
         } catch (err) {
             setError(errorMessage(err, 'Could not save the endpoint.'));
@@ -207,35 +301,44 @@ function NewEndpointForm({
         }
     }
 
+    const secretLabel = authType === 'bearer' ? 'Token' : authType === 'basic' ? 'Password' : 'Value';
+
     return (
         <section
+            ref={box}
             id="new-endpoint"
             aria-labelledby="new-heading"
             className="flex flex-col gap-5 rounded-[14px] border border-amber-line bg-panel p-6 max-sm:p-4"
         >
             <h2 id="new-heading" className="m-0 text-lg font-semibold">
-                New endpoint
+                {initial ? 'Edit endpoint' : 'New endpoint'}
             </h2>
             <form onSubmit={submit} className="flex flex-col gap-5">
                 <div className="grid grid-cols-[repeat(auto-fit,minmax(min(260px,100%),1fr))] gap-4">
-                    <div className="flex flex-col gap-1.5">
-                        <label htmlFor="url" className="text-sm font-medium">
-                            Endpoint URL
-                        </label>
-                        <input
-                            id="url"
-                            type="url"
-                            required
-                            value={url}
-                            onChange={(e) => setUrl(e.target.value)}
-                            placeholder="https://hooks.example.com/termlab"
-                            className={cn(inputClass, 'font-mono text-sm')}
-                        />
-                    </div>
-                    <div className="flex flex-col gap-1.5">
-                        <label htmlFor="desc" className="text-sm font-medium">
-                            Description <span className="font-normal text-dim">(optional)</span>
-                        </label>
+                    <Field id="url" label="Endpoint URL">
+                        <div className="flex gap-2">
+                            <select
+                                aria-label="Method"
+                                value={method}
+                                onChange={(e) => setMethod(e.target.value as WebhookMethod)}
+                                className={cn(selectClass, 'w-[92px] shrink-0 font-mono text-sm')}
+                            >
+                                {METHODS.map((m) => (
+                                    <option key={m}>{m}</option>
+                                ))}
+                            </select>
+                            <input
+                                id="url"
+                                type="url"
+                                required
+                                value={url}
+                                onChange={(e) => setUrl(e.target.value)}
+                                placeholder="https://hooks.example.com/termlab"
+                                className={cn(inputClass, 'min-w-0 flex-1 font-mono text-sm')}
+                            />
+                        </div>
+                    </Field>
+                    <Field id="desc" label="Description" optional>
                         <input
                             id="desc"
                             type="text"
@@ -245,8 +348,14 @@ function NewEndpointForm({
                             placeholder="Ping #agents in Slack"
                             className={inputClass}
                         />
-                    </div>
+                    </Field>
                 </div>
+                {method === 'GET' && (
+                    <p className="m-0 -mt-2 text-[13px] text-dim">
+                        A GET has no body: the receiver gets the event from the{' '}
+                        <span className="font-mono">X-Termlab-Event</span> header only.
+                    </p>
+                )}
 
                 <fieldset className="m-0 flex flex-col gap-2.5 border-0 p-0">
                     <legend className="pb-2.5 text-sm font-medium">Events</legend>
@@ -271,6 +380,101 @@ function NewEndpointForm({
                     </div>
                 </fieldset>
 
+                <fieldset className="m-0 flex flex-col gap-2.5 border-0 p-0">
+                    <legend className="pb-2.5 text-sm font-medium">Authentication</legend>
+                    <div className="grid grid-cols-[repeat(auto-fit,minmax(min(200px,100%),1fr))] gap-3">
+                        <select
+                            aria-label="Authentication"
+                            value={authType}
+                            onChange={(e) => {
+                                setAuthType(e.target.value as WebhookAuthType);
+                                setAuthSecret('');
+                            }}
+                            className={selectClass}
+                        >
+                            {AUTH.map((a) => (
+                                <option key={a.value} value={a.value}>
+                                    {a.label}
+                                </option>
+                            ))}
+                        </select>
+                        {(authType === 'basic' || authType === 'header') && (
+                            <input
+                                aria-label={authType === 'basic' ? 'User name' : 'Header name'}
+                                value={authName}
+                                onChange={(e) => setAuthName(e.target.value)}
+                                placeholder={authType === 'basic' ? 'User name' : 'X-Api-Key'}
+                                autoComplete="off"
+                                className={cn(inputClass, authType === 'header' && 'font-mono text-sm')}
+                            />
+                        )}
+                        {authType !== 'none' && (
+                            <input
+                                type="password"
+                                aria-label={secretLabel}
+                                value={authSecret}
+                                onChange={(e) => setAuthSecret(e.target.value)}
+                                placeholder={keeps ? 'Saved (leave blank to keep)' : secretLabel}
+                                autoComplete="new-password"
+                                required={!keeps}
+                                className={cn(inputClass, 'font-mono text-sm')}
+                            />
+                        )}
+                    </div>
+                    {authType !== 'none' && (
+                        <span className="text-[13px] text-dim">
+                            {authType === 'bearer'
+                                ? 'Sent as Authorization: Bearer <token>.'
+                                : authType === 'basic'
+                                  ? 'Sent as Authorization: Basic.'
+                                  : 'Sent as a header with this name.'}{' '}
+                            Stored on this server and never shown again.
+                        </span>
+                    )}
+                </fieldset>
+
+                <fieldset className="m-0 flex flex-col gap-2.5 border-0 p-0">
+                    <legend className="pb-2.5 text-sm font-medium">
+                        Headers <span className="font-normal text-dim">(optional)</span>
+                    </legend>
+                    {headers.map((h, i) => (
+                        <div key={i} className="flex gap-2">
+                            <input
+                                aria-label={`Header ${i + 1} name`}
+                                value={h.name}
+                                onChange={(e) => setHeader(i, { name: e.target.value })}
+                                placeholder="Header name"
+                                className={cn(inputClass, 'min-w-0 flex-[1_1_40%] font-mono text-sm')}
+                            />
+                            <input
+                                aria-label={`Header ${i + 1} value`}
+                                value={h.value}
+                                onChange={(e) => setHeader(i, { value: e.target.value })}
+                                placeholder="Value"
+                                className={cn(inputClass, 'min-w-0 flex-[1_1_60%] font-mono text-sm')}
+                            />
+                            <Button
+                                variant="outline"
+                                aria-label={`Remove header ${i + 1}`}
+                                onClick={() => setHeaders((list) => list.filter((_, j) => j !== i))}
+                            >
+                                ×
+                            </Button>
+                        </div>
+                    ))}
+                    <div className="flex flex-wrap items-center gap-3">
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={headers.length >= 20}
+                            onClick={() => setHeaders((list) => [...list, { name: '', value: '' }])}
+                        >
+                            Add header
+                        </Button>
+                        <span className="text-[13px] text-dim">Shown here in full: put secrets under Authentication.</span>
+                    </div>
+                </fieldset>
+
                 {error && (
                     <p role="alert" className="m-0 text-sm text-bad">
                         {error}
@@ -278,15 +482,17 @@ function NewEndpointForm({
                 )}
 
                 <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-5">
-                    <span className="text-sm text-dim">A signing secret is created when you save.</span>
+                    <span className="text-sm text-dim">
+                        {initial ? 'The signing secret stays the same.' : 'A signing secret is created when you save.'}
+                    </span>
                     <div className="flex gap-2">
-                        {canCancel && (
+                        {(canCancel || initial) && (
                             <Button variant="outline" onClick={onCancel}>
                                 Cancel
                             </Button>
                         )}
                         <Button type="submit" disabled={busy}>
-                            Save endpoint
+                            {initial ? 'Save changes' : 'Save endpoint'}
                         </Button>
                     </div>
                 </div>
@@ -295,7 +501,15 @@ function NewEndpointForm({
     );
 }
 
-function SecretPanel({ endpoint, onChanged }: { endpoint: WebhookEndpoint; onChanged: () => Promise<void> }) {
+function SecretPanel({
+    endpoint,
+    onChanged,
+    onEdit,
+}: {
+    endpoint: WebhookEndpoint;
+    onChanged: () => Promise<void>;
+    onEdit: () => void;
+}) {
     const toast = useToast();
     const [secret, setSecret] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
@@ -416,6 +630,9 @@ function SecretPanel({ endpoint, onChanged }: { endpoint: WebhookEndpoint; onCha
                 </div>
             ) : (
                 <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" onClick={onEdit}>
+                        Edit
+                    </Button>
                     <Button variant="outline" disabled={!endpoint.enabled} onClick={() => void test()}>
                         Send test event
                     </Button>

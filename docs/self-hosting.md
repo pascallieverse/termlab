@@ -7,7 +7,8 @@ you open it in a browser or on your phone to:
 - see a computer's screen and use its mouse and keyboard (macOS from Termlab 0.2.11, Windows
   and Linux from 0.2.13);
 - get a push notification on your phone when a session needs you;
-- send signed webhooks (Slack, CI, your own scripts) when sessions change.
+- send signed webhooks (Slack, CI, your own scripts) when sessions change;
+- start a session when another service calls an incoming webhook URL (GitHub, CI, a form).
 
 It's one small binary with one SQLite file. There is no shared service in between: the
 only place that can reach your computers is the server you run.
@@ -224,7 +225,8 @@ Every setting is a flag or an environment variable.
   - Removing a computer under Machines cuts it off immediately, and Termlab unlinks itself.
   - Unlinking in Termlab removes it from the server.
 - **The audit log** (Settings) records sign-ins, failed sign-ins, every approval, message,
-  stop and hold, and pairing and webhook changes, with the address they came from.
+  stop and hold, sessions started (from the web or an incoming webhook), and pairing and
+  webhook changes, with the address they came from.
 - **Screen sharing** is off until it's switched on in Termlab on that computer; the server
   can't switch it on. Each session needs an authenticator code (again after 10 minutes), and
   can need someone at the computer to allow it. macOS shows its screen-recording indicator
@@ -242,7 +244,16 @@ Every setting is a flag or an environment variable.
   ```
 
   To check it, compute the HMAC with the endpoint's secret over the raw body, compare in
-  constant time, and reject timestamps older than 5 minutes.
+  constant time, and reject timestamps older than 5 minutes. An endpoint can also send a
+  bearer token, basic auth or an API-key header, and headers of your own. Those secrets are
+  stored in the database and never shown again in the web UI.
+- **Incoming webhooks:** the URL (`/api/hooks/<token>`) is the only credential, so treat it
+  like a password; Settings › Webhooks can replace it. Anyone holding it can start a
+  session with a message of their choosing, with the agent and permissions the hook fixes,
+  in its project or, when the hook takes the project from the request, in any project on
+  that computer. Labels named by the request are only made when the hook allows it. Prefer *Ask first* or *Auto-edit*: with *Full auto* the caller can have the agent
+  run commands on that computer. Each hook takes 20 calls a minute, and every call goes to
+  the audit log (`session.start`, with the caller's address).
 
 ## Backups and upgrades
 

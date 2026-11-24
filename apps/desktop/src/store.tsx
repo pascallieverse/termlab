@@ -262,6 +262,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const labelsOf = useCallback((sessionId: string) => sessionLabels.get(sessionId) ?? NONE, [sessionLabels]);
   const [labelsFor, setLabelsFor] = useState<string | null>(null);
   const labelSaves = useRef(0);
+  // Termlab puts labels on sessions an incoming webhook starts, just after starting them.
+  const labelReload = useRef<number | null>(null);
   const [subagentView, setSubagentView] = useState<{ sessionId: string; subagentId: string } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
@@ -349,6 +351,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           if (e.session.onHold && notifiedFocus.current === e.session.id) notifiedFocus.current = null;
           const prev = prevStatus.current.get(e.session.id);
           prevStatus.current.set(e.session.id, e.session.status);
+          // A session new to the app: read the labels again once Termlab has put any on it.
+          if (prev === undefined && labelReload.current === null) {
+            labelReload.current = window.setTimeout(() => {
+              labelReload.current = null;
+              const save = labelSaves.current;
+              void api.readLabels().then((book) => {
+                if (save === labelSaves.current) setLabelBook(book);
+              }, () => {});
+            }, 1500);
+          }
           setSessions((list) => sortSessions([e.session, ...list.filter((x) => x.id !== e.session.id)]));
           void maybeNotify(e.session, prev);
         } else if (e.type === "sessionRemoved") {

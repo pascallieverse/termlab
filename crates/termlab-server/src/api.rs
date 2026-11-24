@@ -632,11 +632,12 @@ async fn remove_machine(
     app.db.with(|c| {
         c.execute("delete from machines where id = ?1", [id])?;
         c.execute(
-            "delete from meta where key in (?1, ?2, ?3)",
+            "delete from meta where key in (?1, ?2, ?3, ?4)",
             [
                 format!("notes_sync:{id}"),
                 format!("usage:{id}"),
                 format!("projects:{id}"),
+                format!("labels:{id}"),
             ],
         )
     })?;
@@ -654,11 +655,14 @@ async fn remove_machine(
 fn endpoint_view(app: &AppRef, id: i64) -> ApiResult<Value> {
     let v = app.db.with(|c| {
         c.query_row(
-            "select id, url, description, events, enabled, consecutive_failures, last_delivery_at from webhook_endpoints where id = ?1",
+            "select id, url, description, events, enabled, consecutive_failures, last_delivery_at,
+                    method, headers, auth_type, auth_name, auth_secret
+             from webhook_endpoints where id = ?1",
             [id],
             |r| {
                 let enabled = r.get::<_, i64>(4)? != 0;
                 let failures: i64 = r.get(5)?;
+                let secret: Option<String> = r.get(11)?;
                 Ok(json!({
                     "id": r.get::<_, i64>(0)?,
                     "url": r.get::<_, String>(1)?,
@@ -667,6 +671,14 @@ fn endpoint_view(app: &AppRef, id: i64) -> ApiResult<Value> {
                     "enabled": enabled,
                     "health": if !enabled { "disabled" } else if failures >= FAILING_AFTER { "failing" } else { "healthy" },
                     "last_delivery_at": r.get::<_, Option<String>>(6)?,
+                    "method": r.get::<_, String>(7)?,
+                    "headers": serde_json::from_str::<Value>(&r.get::<_, String>(8)?).unwrap_or(json!([])),
+                    // The secret itself never leaves the server.
+                    "auth": {
+                        "type": r.get::<_, String>(9)?,
+                        "name": r.get::<_, Option<String>>(10)?,
+                        "set": secret.is_some_and(|s| !s.is_empty()),
+                    },
                 }))
             },
         )
@@ -697,6 +709,132 @@ struct WebhookIn {
     description: Option<String>,
     events: Option<Vec<String>>,
     enabled: Option<bool>,
+    method: Option<String>,
+    headers: Option<Vec<HeaderIn>>,
+    auth: Option<AuthIn>,
+}
+
+#[derive(Deserialize)]
+struct HeaderIn {
+    name: String,
+    value: String,
+}
+
+#[derive(Deserialize)]
+struct AuthIn {
+    #[serde(rename = "type")]
+    kind: String,
+    /// Basic: the user name. Header: the header's name.
+    name: Option<String>,
+    /// Left out or blank: keep the one saved (when the type stays the same).
+    secret: Option<String>,
+}
+
+fn validate_method(method: &str) -> ApiResult<String> {
+    let m = method.trim().to_ascii_uppercase();
+    if notify::METHODS.contains(&m.as_str()) {
+        Ok(m)
+    } else {
+        Err(ApiError::bad("Pick POST, PUT, PATCH or GET."))
+    }
+}
+
+fn valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 100
+        && axum::http::HeaderName::from_bytes(name.as_bytes()).is_ok()
+}
+
+fn valid_header_value(value: &str) -> bool {
+    value.len() <= 4000 && axum::http::HeaderValue::from_str(value).is_ok()
+}
+
+/// Custom headers as stored (a JSON list of `{ name, value }`); blank rows are dropped.
+fn validate_headers(headers: &[HeaderIn]) -> ApiResult<String> {
+    let mut out = Vec::new();
+    for h in headers {
+        let (name, value) = (h.name.trim(), h.value.trim());
+        if name.is_empty() && value.is_empty() {
+            continue;
+        }
+        if !valid_header_name(name) {
+            return Err(ApiError::bad(format!(
+                "“{}” isn't a valid header name.",
+                clip(name, 40)
+            )));
+        }
+        if notify::reserved_header(name) {
+            return Err(ApiError::bad(format!(
+                "The {name} header is set by Termlab."
+            )));
+        }
+        if !valid_header_value(value) {
+            return Err(ApiError::bad(format!(
+                "The value of {name} isn't valid in a header."
+            )));
+        }
+        out.push(json!({ "name": name, "value": value }));
+    }
+    if out.len() > 20 {
+        return Err(ApiError::bad("Up to 20 headers."));
+    }
+    Ok(Value::Array(out).to_string())
+}
+
+/// (type, name, secret) to store. `current` is what's saved (type, secret), for keeping it.
+fn validate_auth(
+    auth: &AuthIn,
+    current: Option<(&str, Option<String>)>,
+) -> ApiResult<(String, Option<String>, Option<String>)> {
+    let kind = auth.kind.trim();
+    if !notify::AUTH_TYPES.contains(&kind) {
+        return Err(ApiError::bad("Unknown authentication type."));
+    }
+    if kind == "none" {
+        return Ok(("none".into(), None, None));
+    }
+    let name = auth
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    let name = match kind {
+        "basic" => Some(
+            name.filter(|n| !n.contains(':') && n.len() <= 200)
+                .ok_or_else(|| ApiError::bad("Enter a user name (without a colon)."))?
+                .to_string(),
+        ),
+        "header" => {
+            let n = name
+                .filter(|n| valid_header_name(n))
+                .ok_or_else(|| ApiError::bad("Enter a valid header name, like X-Api-Key."))?;
+            if notify::reserved_header(n) {
+                return Err(ApiError::bad(format!("The {n} header is set by Termlab.")));
+            }
+            Some(n.to_string())
+        }
+        _ => None,
+    };
+    let given = auth
+        .secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let secret = match (given, current) {
+        (Some(s), _) => s.to_string(),
+        (None, Some((k, Some(old)))) if k == kind && !old.is_empty() => old,
+        _ => {
+            return Err(ApiError::bad(match kind {
+                "bearer" => "Enter the token.",
+                "basic" => "Enter the password.",
+                _ => "Enter the header's value.",
+            }));
+        }
+    };
+    if !valid_header_value(&secret) {
+        return Err(ApiError::bad("That secret can't be sent in a header."));
+    }
+    Ok((kind.to_string(), name, Some(secret)))
 }
 
 fn validate_url(app: &AppRef, url: &str) -> ApiResult<String> {
@@ -734,14 +872,24 @@ async fn create_webhook(
 ) -> ApiResult<Response> {
     let url = validate_url(&app, b.url.as_deref().unwrap_or(""))?;
     let events = validate_events(b.events.as_deref().unwrap_or(&[]))?;
+    let method = validate_method(b.method.as_deref().unwrap_or("POST"))?;
+    let headers = validate_headers(b.headers.as_deref().unwrap_or(&[]))?;
+    let (auth_type, auth_name, auth_secret) = match &b.auth {
+        Some(a) => validate_auth(a, None)?,
+        None => ("none".into(), None, None),
+    };
     let description = b
         .description
         .map(|d| clip(d.trim(), 200))
         .filter(|d| !d.is_empty());
     let id = app.db.with(|c| {
         c.execute(
-            "insert into webhook_endpoints (url, description, events, secret, created_at) values (?1, ?2, ?3, ?4, ?5)",
-            (&url, &description, &events, format!("whsec_{}", token(30)), now()),
+            "insert into webhook_endpoints (url, description, events, secret, created_at, method, headers, auth_type, auth_name, auth_secret)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                &url, &description, &events, format!("whsec_{}", token(30)), now(),
+                &method, &headers, &auth_type, &auth_name, &auth_secret
+            ],
         )?;
         Ok(c.last_insert_rowid())
     })?;
@@ -751,45 +899,74 @@ async fn create_webhook(
 
 async fn update_webhook(
     State(app): State<AppRef>,
-    _o: Owner,
+    owner: Owner,
     Path(id): Path<i64>,
     Json(b): Json<WebhookIn>,
 ) -> ApiResult<Json<Value>> {
-    endpoint_view(&app, id)?;
-    if let Some(url) = b.url {
-        let url = validate_url(&app, &url)?;
-        app.db.with(|c| {
-            c.execute(
-                "update webhook_endpoints set url = ?1 where id = ?2",
-                (url, id),
-            )
-        })?;
-    }
-    if let Some(d) = b.description {
-        let d = Some(clip(d.trim(), 200)).filter(|d| !d.is_empty());
-        app.db.with(|c| {
-            c.execute(
-                "update webhook_endpoints set description = ?1 where id = ?2",
-                (d, id),
-            )
-        })?;
-    }
-    if let Some(events) = b.events {
-        let events = validate_events(&events)?;
-        app.db.with(|c| {
-            c.execute(
-                "update webhook_endpoints set events = ?1 where id = ?2",
-                (events, id),
-            )
-        })?;
-    }
-    if let Some(enabled) = b.enabled {
-        app.db.with(|c| {
-            c.execute(
+    let before = endpoint_view(&app, id)?;
+    // Check everything first, so a bad field changes nothing.
+    let url = b
+        .url
+        .as_deref()
+        .map(|u| validate_url(&app, u))
+        .transpose()?;
+    let events = b.events.as_deref().map(validate_events).transpose()?;
+    let method = b.method.as_deref().map(validate_method).transpose()?;
+    let headers = b.headers.as_deref().map(validate_headers).transpose()?;
+    let auth = match &b.auth {
+        Some(a) => {
+            let saved: Option<String> = app.db.with(|c| {
+                c.query_row(
+                    "select auth_secret from webhook_endpoints where id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+            })?;
+            let kind = before["auth"]["type"].as_str().unwrap_or("none");
+            Some(validate_auth(a, Some((kind, saved)))?)
+        }
+        None => None,
+    };
+    let description = b
+        .description
+        .map(|d| Some(clip(d.trim(), 200)).filter(|d| !d.is_empty()));
+    app.db.with(|c| {
+        let tx = c.unchecked_transaction()?;
+        if let Some(url) = &url {
+            tx.execute("update webhook_endpoints set url = ?1 where id = ?2", (url, id))?;
+        }
+        if let Some(d) = &description {
+            tx.execute("update webhook_endpoints set description = ?1 where id = ?2", (d, id))?;
+        }
+        if let Some(events) = &events {
+            tx.execute("update webhook_endpoints set events = ?1 where id = ?2", (events, id))?;
+        }
+        if let Some(method) = &method {
+            tx.execute("update webhook_endpoints set method = ?1 where id = ?2", (method, id))?;
+        }
+        if let Some(headers) = &headers {
+            tx.execute("update webhook_endpoints set headers = ?1 where id = ?2", (headers, id))?;
+        }
+        if let Some((kind, name, secret)) = &auth {
+            tx.execute(
+                "update webhook_endpoints set auth_type = ?1, auth_name = ?2, auth_secret = ?3 where id = ?4",
+                (kind, name, secret, id),
+            )?;
+        }
+        if let Some(enabled) = b.enabled {
+            tx.execute(
                 "update webhook_endpoints set enabled = ?1, consecutive_failures = 0 where id = ?2",
                 (enabled, id),
-            )
-        })?;
+            )?;
+        }
+        tx.commit()
+    })?;
+    if url.is_some() || method.is_some() || headers.is_some() || auth.is_some() {
+        let url = url
+            .as_deref()
+            .or(before["url"].as_str())
+            .unwrap_or_default();
+        notify::audit(&app, "webhook.updated", Some(url), None, None, &owner.ip);
     }
     Ok(Json(endpoint_view(&app, id)?))
 }
