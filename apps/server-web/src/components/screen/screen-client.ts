@@ -7,7 +7,8 @@
  * The wire format is in docs/server-protocol.md ("Screen sessions").
  */
 
-export type Quality = 'low' | 'balanced' | 'high';
+/** `native`: the display at its full pixel size (beyond 4K needs HEVC; fewer frames). */
+export type Quality = 'low' | 'balanced' | 'high' | 'native';
 
 export type ScreenDisplay = { id: number; name: string; width: number; height: number; scale: number; primary: boolean };
 
@@ -27,7 +28,23 @@ export type ScreenState =
     | { state: 'live' }
     | { state: 'ended'; message: string | null };
 
-export type ScreenStats = { fps: number; kbps: number; width: number; height: number };
+export type ScreenStats = { fps: number; kbps: number; width: number; height: number; codec: string };
+
+/** A pointer picture from the computer, ready to draw. */
+export type CursorShape = {
+    id: number;
+    /** Size and click point in the picture's pixels. */
+    width: number;
+    height: number;
+    hotX: number;
+    hotY: number;
+    /** Picture pixels per display point (2 for a Retina pointer). */
+    scale: number;
+    image: HTMLCanvasElement;
+};
+
+/** Where the computer's pointer is: x and y 0..1 across the shown display. */
+export type RemoteCursor = { x: number; y: number; visible: boolean; shape: CursorShape | null };
 
 type Handlers = {
     onState: (s: ScreenState) => void;
@@ -38,6 +55,8 @@ type Handlers = {
     onClipboard: (text: string) => void;
     onClipboardSaved: (ok: boolean) => void;
     onStats: (s: ScreenStats) => void;
+    /** The computer's pointer moved or changed (the computer leaves it out of the video). */
+    onCursor: (c: RemoteCursor) => void;
 };
 
 function fromBase64(b64: string): Uint8Array {
@@ -52,6 +71,73 @@ function fromBase64(b64: string): Uint8Array {
 
 export function webCodecsAvailable(): boolean {
     return typeof window !== 'undefined' && 'VideoDecoder' in window && 'EncodedVideoChunk' in window;
+}
+
+/**
+ * The widest HEVC (H.265) picture this browser decodes, 0 if none (then the computer sends
+ * H.264). HEVC is sharper for the same bits and goes beyond 4K; Chrome and Edge decode it
+ * where the hardware can, Safari too, Firefox not on every system.
+ */
+async function hevcWidth(): Promise<number> {
+    const sizes: [number, number, string][] = [
+        [7680, 4320, 'hvc1.1.6.H186.B0'],
+        [6144, 3456, 'hvc1.1.6.H183.B0'],
+        [3840, 2160, 'hvc1.1.6.H153.B0'],
+    ];
+    for (const [codedWidth, codedHeight, codec] of sizes) {
+        try {
+            const r = await VideoDecoder.isConfigSupported({ codec, codedWidth, codedHeight, optimizeForLatency: true });
+            if (r.supported) {
+                return codedWidth;
+            }
+        } catch {
+            // Not this one.
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * The widest HEVC 4:4:4 picture this browser decodes, 0 if none. Full colour detail keeps
+ * coloured text crisp; Chrome decodes it in hardware on Apple silicon.
+ */
+async function hevc444Width(max: number): Promise<number> {
+    const sizes: [number, number, string][] = [
+        [7680, 4320, 'hvc1.4.10.H186.BE.8'],
+        [6144, 3456, 'hvc1.4.10.H183.BE.8'],
+        [3840, 2160, 'hvc1.4.10.H153.BE.8'],
+    ];
+    for (const [codedWidth, codedHeight, codec] of sizes) {
+        if (codedWidth > max) continue;
+        try {
+            const r = await VideoDecoder.isConfigSupported({ codec, codedWidth, codedHeight, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
+            if (r.supported) {
+                return codedWidth;
+            }
+        } catch {
+            // Not this one.
+        }
+    }
+
+    return 0;
+}
+
+const isHevc = (codec: string) => codec.startsWith('hvc1') || codec.startsWith('hev1');
+/** HEVC range extensions (profile 4): here, 4:4:4. */
+const isHevc444 = (codec: string) => /^(hvc1|hev1)\.4\./.test(codec);
+
+/** A pointer picture (straight RGBA) as a canvas. */
+function shapeImage(width: number, height: number, rgba: Uint8Array): HTMLCanvasElement {
+    const c = document.createElement('canvas');
+    c.width = width;
+    c.height = height;
+    const ctx = c.getContext('2d');
+    if (ctx && rgba.length === width * height * 4) {
+        ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0);
+    }
+
+    return c;
 }
 
 export class ScreenClient {
@@ -71,6 +157,9 @@ export class ScreenClient {
     private statsTimer: number;
     private width = 0;
     private height = 0;
+    /** What this browser decodes (told to the computer); lowered when a format fails. */
+    private caps = { hevc: 0, hevc444: 0 };
+    private shapes = new Map<number, CursorShape>();
     /** Leaving the page ends the session (a page kept for Back must not keep it open). */
     private onPageHide = () => this.close();
 
@@ -89,7 +178,13 @@ export class ScreenClient {
             this.lastError ??= 'The connection to the server dropped.';
         };
         this.statsTimer = window.setInterval(() => {
-            this.h.onStats({ fps: this.frames, kbps: Math.round((this.bytes * 8) / 1000), width: this.width, height: this.height });
+            this.h.onStats({
+                fps: this.frames,
+                kbps: Math.round((this.bytes * 8) / 1000),
+                width: this.width,
+                height: this.height,
+                codec: this.config ? (isHevc444(this.config.codec) ? 'HEVC 4:4:4' : isHevc(this.config.codec) ? 'HEVC' : 'H.264') : '',
+            });
             this.frames = 0;
             this.bytes = 0;
         }, 1000);
@@ -143,6 +238,12 @@ export class ScreenClient {
         switch (m.type) {
             case 'hello':
                 this.h.onHello(m as unknown as ScreenHello);
+                void (async () => {
+                    const hevc = await hevcWidth();
+                    const hevc444 = hevc ? await hevc444Width(hevc) : 0;
+                    this.caps = { hevc, hevc444 };
+                    this.sendCaps();
+                })();
                 break;
             case 'status':
                 if (m.state === 'confirming') {
@@ -170,10 +271,33 @@ export class ScreenClient {
             case 'clipboard.saved':
                 this.h.onClipboardSaved(!!m.ok);
                 break;
+            case 'cursor.shape': {
+                const id = Number(m.id);
+                const width = Number(m.width);
+                const height = Number(m.height);
+                this.shapes.set(id, {
+                    id,
+                    width,
+                    height,
+                    hotX: Number(m.hot_x),
+                    hotY: Number(m.hot_y),
+                    scale: Number(m.scale) || 1,
+                    image: shapeImage(width, height, fromBase64(String(m.rgba ?? ''))),
+                });
+                break;
+            }
+            case 'cursor':
+                this.h.onCursor({ x: Number(m.x), y: Number(m.y), visible: !!m.visible, shape: this.shapes.get(Number(m.id)) ?? null });
+                break;
             case 'error':
                 this.lastError = String(m.message ?? 'The session ended.');
                 break;
         }
+    }
+
+    /** Tells the computer what this browser decodes, and that it draws the pointer itself. */
+    private sendCaps() {
+        this.send({ type: 'codecs', hevc: this.caps.hevc, hevc444: this.caps.hevc444, cursor: true });
     }
 
     /** Acknowledge frames that won't come out of the decoder (reset or skipped). */
@@ -184,6 +308,21 @@ export class ScreenClient {
         this.decoding = [];
     }
 
+    /**
+     * HEVC said yes but didn't work: ask for the next format down (4:4:4 → HEVC → H.264); a
+     * new config follows.
+     */
+    private hevcFallback(codec: string) {
+        if (isHevc444(codec) && this.caps.hevc444) {
+            this.caps.hevc444 = 0;
+            this.sendCaps();
+        } else if (this.caps.hevc) {
+            this.caps = { hevc: 0, hevc444: 0 };
+            this.sendCaps();
+        }
+        this.waitingForKey = true;
+    }
+
     private newDecoder(): VideoDecoder {
         return new VideoDecoder({
             output: (frame) => this.draw(frame),
@@ -191,7 +330,9 @@ export class ScreenClient {
                 console.warn('[screen] decoder error', e);
                 this.decoder = null;
                 this.releaseDecoding();
-                if (this.config && !this.ended) {
+                if (this.config && isHevc(this.config.codec) && !this.ended) {
+                    this.hevcFallback(this.config.codec);
+                } else if (this.config && !this.ended) {
                     this.configure(this.config);
                     this.send({ type: 'keyframe' });
                 }
@@ -211,6 +352,10 @@ export class ScreenClient {
             this.decoder.configure(config);
         } catch (e) {
             console.warn('[screen] configure failed', e);
+            if (isHevc(config.codec)) {
+                this.hevcFallback(config.codec);
+                return;
+            }
             this.lastError = 'This browser can’t decode the screen video.';
             this.ws.close();
             return;

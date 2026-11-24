@@ -12,16 +12,24 @@
 //! - `displays`: prints the displays as JSON (for checks).
 //! - `probe <seconds> <out.h264>`: captures the main display into an H.264 file and prints
 //!   what it got (for development: `ffprobe` can read the file).
-//! - `permissions`: prints whether screen capture and input are allowed, as JSON.
+//! - `permissions [data-dir]`: prints whether screen capture and input are allowed, as JSON.
+//! - `authorize <data-dir>`: Linux under Wayland: asks the desktop now and keeps the approval,
+//!   so later sessions start without anyone at the computer. Elsewhere: nothing to do.
 
-// Other platforms have a stub for now, which leaves the shared types unused there.
-#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// Platforms without screen sharing have a stub, which leaves the shared types unused there.
+#![cfg_attr(
+    not(any(target_os = "macos", windows, target_os = "linux")),
+    allow(dead_code)
+)]
 
 mod platform;
 mod proto;
 mod session;
+mod system;
 
 use std::path::PathBuf;
+
+use anyhow::Context as _;
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -41,8 +49,15 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         "permissions" => {
+            if let Some(dir) = args.next() {
+                platform::set_data_dir(&PathBuf::from(dir));
+            }
             println!("{}", serde_json::to_string(&platform::permissions())?);
             Ok(())
+        }
+        "authorize" => {
+            let dir = PathBuf::from(args.next().context("authorize <data-dir>")?);
+            platform::authorize(&dir)
         }
         "probe" => {
             let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(3);
@@ -57,7 +72,9 @@ fn main() -> anyhow::Result<()> {
             println!("termlab-screen {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        other => anyhow::bail!("unknown command: {other:?} (serve, displays, permissions, probe)"),
+        other => anyhow::bail!(
+            "unknown command: {other:?} (serve, displays, permissions, authorize, probe)"
+        ),
     }
 }
 

@@ -205,7 +205,7 @@ Browser → server:
 
 ## Screen sessions
 
-Seeing and controlling a machine's screen (Termlab 0.2.11+, macOS). The machine's owner
+Seeing and controlling a machine's screen (Termlab 0.2.11+: macOS; 0.2.13+: Windows and Linux too). The machine's owner
 switches it on in Termlab (Settings › Remote access › Screen sharing); the server can't.
 
 1. The browser calls `POST /api/machines/{id}/screen` with a code from the authenticator app
@@ -223,14 +223,26 @@ switches it on in Termlab (Settings › Remote access › Screen sharing); the s
    and `screen.ended` go to the audit log (`screen.denied` for a wrong code).
 
 Machine → browser:
-- binary video frames: `[1, flags, seq: u32, timestamp_us: u64, H.264 AVCC data]`, big-endian;
-  `flags & 1`: key frame.
+- binary video frames: `[1, flags, seq: u32, timestamp_us: u64, data]`, big-endian, where data
+  is length-prefixed NAL units (H.264 or HEVC, as the last `config` says); `flags & 1`: key frame.
 - `{ "type": "hello", "displays": { id, name, width, height, scale, primary }[], "display": id, "quality": "balanced", "input": bool, "os", "version" }`.
   `input` false: the computer won't take mouse and keyboard input (Accessibility not allowed).
-- `{ "type": "config", "codec": "avc1.4d0028", "description": "<base64 avcC>", "width", "height", "display" }`:
-  (re)configure the decoder; a key frame follows.
+  `os`: `macos`, `windows` or `linux` (the viewer labels keys and shortcuts by it). Windows
+  and Linux encode H.264 only (the `hevc` sizes in `codecs` are ignored there) and treat
+  `native` as `high`.
+- `{ "type": "config", "codec": "avc1.640034" | "hvc1.1.6.H153.B0" | "hvc1.4.10.H153.BE.8", "description": "<base64 avcC or hvcC>", "width", "height", "display" }`:
+  (re)configure the decoder; a key frame follows. `hvc1.4…` is HEVC 4:4:4 (full colour detail).
+- `{ "type": "cursor.shape", "id", "width", "height", "hot_x", "hot_y", "scale", "rgba": "<base64>" }`:
+  a pointer picture (straight RGBA, `width`×`height` pixels, clicking at `hot_x`,`hot_y`;
+  `scale` picture pixels per display point), sent once per shape and session.
+- `{ "type": "cursor", "x", "y", "visible": bool, "id" }`: the pointer moved or changed shape
+  (`id`: a `cursor.shape`, 0 for none). x and y across the shown display, outside 0..1 when
+  it's on another display. Only after the browser said it draws the pointer (`codecs`), and
+  only where the machine can read it apart (macOS, Windows, X11; Wayland draws it into the
+  picture).
 - `{ "type": "status", "state": "confirming" }`: waiting for someone at the computer to allow it.
-- `{ "type": "display", "display": id }`, `{ "type": "quality", "quality": "low" | "balanced" | "high" }`
+- `{ "type": "display", "display": id }`, `{ "type": "quality", "quality": "low" | "balanced" | "high" | "native" }`
+  (`high`: up to 4K at 60 fps; `native`: the display's full pixel size, beyond 4K in HEVC only)
 - `{ "type": "clipboard", "text" }`, `{ "type": "clipboard.saved", "ok": bool }`
 - `{ "type": "error", "message" }`: why the session ends.
 
@@ -240,6 +252,12 @@ Browser → machine:
   more delay. Once the screen is still, it re-encodes the last picture (as ordinary delta
   frames) until it is sharp.
 - `{ "type": "keyframe" }`: the decoder was reset; send a key frame.
+- `{ "type": "codecs", "hevc": width, "hevc444": width, "cursor": true }`: right after the
+  hello, the widest HEVC picture the browser decodes (0: none), the same for HEVC 4:4:4, and
+  whether it draws the pointer itself (then the machine leaves it out of the video and sends
+  `cursor` messages). With HEVC the machine encodes HEVC (sharper for the same bits),
+  otherwise H.264; Sharp and Native use 4:4:4 where both sides can (macOS on Apple silicon).
+  Sent again with lower values if a format fails in the decoder (4:4:4, then HEVC).
 - `{ "type": "display", "id" }`, `{ "type": "quality", "quality" }`
 - `{ "type": "pointer", "x": 0..1, "y": 0..1, "action": "move" | "down" | "up", "button": 0 | 1 | 2, "clicks": n }`
   (x and y across the shown display; buttons as `MouseEvent.button`).

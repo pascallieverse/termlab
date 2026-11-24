@@ -463,12 +463,15 @@ impl Bridge {
             "data_dir": self.data_dir,
             "viewer": m["viewer"].as_str().map(|s| clip(s, 200)).unwrap_or_default(),
         });
-        let child = tokio::process::Command::new(&helper)
-            .arg("serve")
+        let mut cmd = tokio::process::Command::new(&helper);
+        cmd.arg("serve")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+            .stderr(std::process::Stdio::null());
+        // No console window of its own.
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
+        let child = cmd.spawn();
         let mut child = match child {
             Ok(c) => c,
             Err(e) => {

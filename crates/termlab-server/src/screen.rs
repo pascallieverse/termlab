@@ -60,6 +60,7 @@ const BROWSER_TYPES: &[&str] = &[
     "release",
     "clipboard.set",
     "clipboard.get",
+    "codecs",
 ];
 
 /// What a machine said about screen sharing.

@@ -5,6 +5,7 @@
 //! one place `unsafe` is allowed in this crate (the workspace denies it elsewhere).
 #![allow(unsafe_code)]
 
+mod cursor;
 mod input;
 mod keymap;
 
@@ -31,9 +32,12 @@ use objc2_core_graphics::{
 };
 use objc2_core_media::{
     CMSampleBuffer, CMTime, kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms,
-    kCMSampleAttachmentKey_NotSync, kCMTimeInvalid, kCMVideoCodecType_H264,
+    kCMSampleAttachmentKey_NotSync, kCMTimeInvalid, kCMVideoCodecType_H264, kCMVideoCodecType_HEVC,
 };
-use objc2_core_video::{CVImageBuffer, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange};
+use objc2_core_video::{
+    CVImageBuffer, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+    kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange,
+};
 use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCFrameStatus, SCShareableContent, SCStream, SCStreamConfiguration,
@@ -45,12 +49,37 @@ use objc2_video_toolbox::{
     kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
     kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel,
-    kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
+    kVTProfileLevel_HEVC_Main_AutoLevel, kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{Permissions, WINDOW};
-use crate::proto::{DisplayInfo, Encoded, Quality, VideoConfig, avc_codec};
+use super::{Bounds, Permissions, REFINE_AFTER, REFINE_MAX, Video, WINDOW};
+use crate::proto::{Codec, DisplayInfo, Encoded, Encoding, VideoConfig, avc_codec, hevc_codec};
+
+/// VideoToolbox encodes HEVC too (Apple silicon: up to 8K).
+pub const HEVC: bool = true;
+/// And HEVC 4:4:4, in hardware on Apple silicon (checked when the stream starts).
+pub const HEVC444: bool = true;
+
+/// Starts capturing `display` (with the `soft` feature and `TERMLAB_SCREEN_SOFT=1`: a test
+/// pattern through the Windows/Linux encoder instead).
+pub fn start(
+    display: u32,
+    enc: Encoding,
+    out: UnboundedSender<Encoded>,
+) -> anyhow::Result<Box<dyn Video>> {
+    #[cfg(feature = "soft")]
+    if std::env::var_os("TERMLAB_SCREEN_SOFT").is_some() {
+        let enc = Encoding {
+            codec: crate::proto::Codec::H264,
+            ..enc
+        };
+        return Ok(Box::new(super::soft::Stream::start(enc, out, super::soft::no_hardware, || {
+            Ok(super::soft::test_pattern())
+        })?));
+    }
+    Ok(Box::new(Stream::start(display, enc, out)?))
+}
 
 pub fn permissions() -> Permissions {
     Permissions {
@@ -148,6 +177,7 @@ struct Sink {
     inflight: Arc<AtomicU32>,
     /// Size of the last encoded frame, to tell when refining a still screen is done.
     last_size: Arc<AtomicUsize>,
+    codec: Codec,
     width: u32,
     height: u32,
     sent_config: Mutex<Option<VideoConfig>>,
@@ -187,13 +217,14 @@ fn set_property(session: &VTCompressionSession, key: &CFString, value: &CFType) 
 }
 
 impl Encoder {
-    fn new(
-        width: u32,
-        height: u32,
-        fps: u32,
-        bitrate: u32,
-        sink: Arc<Sink>,
-    ) -> anyhow::Result<Self> {
+    fn new(width: u32, height: u32, enc: Encoding, sink: Arc<Sink>) -> anyhow::Result<Self> {
+        let Encoding {
+            codec,
+            fps,
+            bitrate,
+            chroma444,
+            ..
+        } = enc;
         let sink = Arc::into_raw(sink);
         let create = |low_latency: bool| -> Option<CFRetained<VTCompressionSession>> {
             // SAFETY: the constant is a valid CFString.
@@ -208,7 +239,10 @@ impl Encoder {
                     None,
                     width as i32,
                     height as i32,
-                    kCMVideoCodecType_H264,
+                    match codec {
+                        Codec::H264 => kCMVideoCodecType_H264,
+                        Codec::Hevc => kCMVideoCodecType_HEVC,
+                    },
                     low_latency.then(|| spec.as_opaque()),
                     None,
                     None,
@@ -241,10 +275,16 @@ impl Encoder {
                 kVTCompressionPropertyKey_AllowFrameReordering,
                 cf(CFBoolean::new(false)),
             );
+            // Not in the SDK's headers, but listed by the encoder (Apple silicon).
+            let main444 = CFString::from_static_str("HEVC_Main444_AutoLevel");
             set_property(
                 &session,
                 kVTCompressionPropertyKey_ProfileLevel,
-                cf(kVTProfileLevel_H264_High_AutoLevel),
+                cf(match (codec, chroma444) {
+                    (Codec::H264, _) => kVTProfileLevel_H264_High_AutoLevel,
+                    (Codec::Hevc, false) => kVTProfileLevel_HEVC_Main_AutoLevel,
+                    (Codec::Hevc, true) => &main444,
+                }),
             );
             // Key frames when asked for (a new or reset decoder), not on a timer.
             set_property(
@@ -357,13 +397,16 @@ unsafe fn not_sync(sample: &CMSampleBuffer) -> bool {
     }
 }
 
-/// The `avcC` record of a sample's format.
-unsafe fn avcc(sample: &CMSampleBuffer) -> Option<Vec<u8>> {
+/// The decoder configuration record (`avcC` or `hvcC`) of a sample's format.
+unsafe fn record(sample: &CMSampleBuffer, codec: Codec) -> Option<Vec<u8>> {
     let fd = unsafe { sample.format_description() }?;
     let atoms =
         unsafe { fd.extension(kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms) }?;
     let dict = atoms.downcast_ref::<CFDictionary>()?;
-    let key = CFString::from_static_str("avcC");
+    let key = CFString::from_static_str(match codec {
+        Codec::H264 => "avcC",
+        Codec::Hevc => "hvcC",
+    });
     let v = unsafe { dict.value((&*key as *const CFString).cast()) } as *const CFType;
     let data = unsafe { v.as_ref() }?.downcast_ref::<CFData>()?;
     Some(data.to_vec())
@@ -387,9 +430,12 @@ unsafe fn encoded(sample: &CMSampleBuffer, sink: &Sink) -> Option<Encoded> {
         0
     };
     let mut config = None;
-    if key && let Some(record) = unsafe { avcc(sample) } {
+    if key && let Some(record) = unsafe { record(sample, sink.codec) } {
         let next = VideoConfig {
-            codec: avc_codec(&record)?,
+            codec: match sink.codec {
+                Codec::H264 => avc_codec(&record)?,
+                Codec::Hevc => hevc_codec(&record)?,
+            },
             description: record,
             width: sink.width,
             height: sink.height,
@@ -429,15 +475,6 @@ struct Pipeline {
     /// A refining pass smaller than this adds little: the picture is as sharp as it gets.
     settled_bytes: usize,
 }
-
-/// Refining a still screen: macOS only sends a frame when something changes, so the last
-/// frame of a movement (or a key frame, which the rate control keeps small) would stay soft
-/// for as long as the screen is still. Re-encoding the same picture lets the encoder add back
-/// detail pass by pass (at 4K: about 10, 50, 80, 100, 120, 150, 35, 15, 7 KB) until a
-/// pass comes out small. Only when nothing is outstanding, so it never delays a real change.
-const REFINE_AFTER: Duration = Duration::from_millis(50);
-/// At most this many passes per still picture, whatever their size.
-const REFINE_MAX: u32 = 16;
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -577,18 +614,10 @@ impl Output {
     }
 }
 
-/// Where a display is on the global screen, in points: (x, y, width, height).
-#[derive(Debug, Clone, Copy)]
-pub struct Bounds {
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-}
-
 /// One display being captured and encoded.
 pub struct Stream {
     pipe: Arc<Pipeline>,
+    cursor: Mutex<cursor::Reader>,
     stream: Retained<SCStream>,
     _output: Retained<Output>,
     _queue: DispatchRetained<DispatchQueue>,
@@ -623,7 +652,7 @@ fn wait_for(
 impl Stream {
     pub fn start(
         display: u32,
-        quality: Quality,
+        enc: Encoding,
         out: UnboundedSender<Encoded>,
     ) -> anyhow::Result<Self> {
         let content = shareable()?;
@@ -643,9 +672,9 @@ impl Stream {
                 d.height().max(1) as f64,
             )
         };
-        let (max_width, fps, bitrate) = quality.params();
         let native = (pw * display_scale(id)).round() as u32;
-        let width = native.min(max_width) & !1;
+        let width = native.min(enc.max_width) & !1;
+        let fps = enc.fps;
         let height = ((width as f64 * ph / pw).round() as u32) & !1;
 
         let inflight = Arc::new(AtomicU32::new(0));
@@ -654,11 +683,12 @@ impl Stream {
             out,
             inflight: inflight.clone(),
             last_size: last_size.clone(),
+            codec: enc.codec,
             width,
             height,
             sent_config: Mutex::new(None),
         });
-        let encoder = Encoder::new(width, height, fps, bitrate, sink)?;
+        let encoder = Encoder::new(width, height, enc, sink)?;
         let pipe = Arc::new(Pipeline {
             encoder: Mutex::new(Some(encoder)),
             pending: Mutex::new(None),
@@ -683,9 +713,13 @@ impl Stream {
             let cfg = SCStreamConfiguration::new();
             cfg.setWidth(width as usize);
             cfg.setHeight(height as usize);
-            cfg.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+            cfg.setPixelFormat(if enc.chroma444 {
+                kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange
+            } else {
+                kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            });
             cfg.setMinimumFrameInterval(CMTime::new(1, fps as i32));
-            cfg.setShowsCursor(true);
+            cfg.setShowsCursor(enc.draw_cursor);
             cfg.setQueueDepth(5);
             cfg.setCapturesAudio(false);
             let stream = SCStream::initWithFilter_configuration_delegate(
@@ -712,6 +746,7 @@ impl Stream {
         let r = CGDisplayBounds(id);
         Ok(Stream {
             pipe,
+            cursor: Mutex::new(cursor::Reader::default()),
             stream,
             _output: output,
             _queue: queue,
@@ -724,37 +759,39 @@ impl Stream {
             },
         })
     }
+}
 
-    pub fn display(&self) -> u32 {
+impl Video for Stream {
+    fn display(&self) -> u32 {
         self.display
     }
 
-    pub fn bounds(&self) -> Bounds {
+    fn bounds(&self) -> Bounds {
         self.bounds
     }
 
-    /// The browser decoded a frame.
-    pub fn ack(&self) {
+    fn ack(&self) {
         self.pipe.ack();
     }
 
-    /// Send a key frame next (re-encoding the current screen when nothing changes).
-    pub fn keyframe(&self) {
+    fn keyframe(&self) {
         self.pipe.keyframe();
     }
 
-    /// Sharpen a still screen (see [`REFINE_AFTER`]); call every [`super::REFINE_TICK`].
-    pub fn refine(&self) {
+    fn refine(&self) {
         self.pipe.refine();
     }
 
-    /// Acknowledgements stopped coming (a hiccup): open the window again.
-    pub fn reset_window(&self) {
+    fn reset_window(&self) {
         self.pipe.reset_window();
     }
 
-    pub fn inflight(&self) -> u32 {
+    fn inflight(&self) -> u32 {
         self.pipe.inflight.load(Ordering::Acquire)
+    }
+
+    fn cursor(&self) -> Option<super::cursor::Cursor> {
+        Some(lock(&self.cursor).read())
     }
 }
 

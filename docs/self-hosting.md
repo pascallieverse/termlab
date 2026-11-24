@@ -4,7 +4,8 @@
 you open it in a browser or on your phone to:
 
 - see every session live, answer approvals, and type into a session's terminal;
-- see a computer's screen and use its mouse and keyboard (macOS, Termlab 0.2.11+);
+- see a computer's screen and use its mouse and keyboard (macOS from Termlab 0.2.11, Windows
+  and Linux from 0.2.13);
 - get a push notification on your phone when a session needs you;
 - send signed webhooks (Slack, CI, your own scripts) when sessions change.
 
@@ -147,27 +148,53 @@ notifications on iPhone. Then turn on notifications in **Settings › Notificati
 
 ### Screen sharing
 
-To see and control a Mac's screen from the server:
+To see and control a computer's screen from the server:
 
-1. On the Mac, in Termlab, open **Settings › Remote access** and switch on **Allow screen
-   sharing**. Allow Termlab under **Screen Recording** and **Accessibility** when macOS asks
-   (Termlab has buttons that open the right pages in System Settings). Without
-   Accessibility the screen is view only.
-2. Optionally switch on **Ask on this computer each time**: someone at the Mac then has to
-   click Allow before each session.
+1. On the computer, in Termlab, open **Settings › Remote access** and switch on **Allow
+   screen sharing**. Then, depending on the system:
+   - **macOS:** allow Termlab under **Screen Recording** and **Accessibility** when macOS
+     asks (Termlab has buttons that open the right pages in System Settings). Without
+     Accessibility the screen is view only.
+   - **Windows:** nothing to allow.
+   - **Linux with X11:** nothing to allow.
+   - **Linux with Wayland** (the default on Ubuntu, Fedora and most current desktops): click
+     **Approve…** and pick the screen in your desktop's dialog. The desktop remembers it, so
+     later sessions start without anyone at the computer. The picture comes through
+     GStreamer: install `gstreamer1.0-tools gstreamer1.0-pipewire` (Debian, Ubuntu) or
+     `gstreamer1-plugins-base-tools pipewire-gstreamer` (Fedora).
+2. Optionally switch on **Ask on this computer each time**: someone at the computer then has
+   to click Allow before each session (Linux: needs `zenity` or `kdialog`).
 3. On the server, click **Screen** in the header (or on the machine under Settings ›
    Machines) and enter a code from your authenticator app.
 
 The picture is H.264, decoded by the browser (Chrome, Edge, Firefox 130+ or Safari 16.4+).
-It goes through the server: while the screen changes, count on up to 1.5 Mbit/s (Low,
-1280 pixels wide, 30 fps), 6 Mbit/s (Balanced, 1920, 60 fps) or 16 Mbit/s (Sharp, up to 4K,
-60 fps); almost nothing while it doesn't. When the screen stops changing, the picture is
+From a Mac, browsers that decode HEVC (H.265; Chrome, Edge and Safari on most computers) get
+HEVC, which is sharper for the same bits; at Sharp and Native, from a Mac with Apple silicon
+to a browser that decodes it (Chrome on a Mac does), HEVC 4:4:4 keeps full colour detail, so
+coloured text has no colour fringes. Windows and Linux encode H.264 on the graphics card
+where they can: Windows through its Media Foundation encoder (NVIDIA, Intel, AMD), Linux
+through GStreamer with VA-API (Intel, AMD) or NVENC (NVIDIA): install
+`gstreamer1.0-tools gstreamer1.0-plugins-bad` and your VA driver (`intel-media-va-driver`
+or `mesa-va-drivers`). Without one they encode in software (Sharp at 4K runs at fewer frames
+on slower processors; Balanced suits most connections); the computer's
+`termlab-screen.log` says which encoder runs. Your own pointer shows the computer's pointer
+shape and moves without delay (except on Linux with Wayland, where the pointer is part of
+the picture). It goes through the server: while the screen
+changes, count on up to 1.5 Mbit/s (Low, 1280 pixels wide, 30 fps), 6 Mbit/s (Balanced,
+1920, 60 fps) or 16 Mbit/s (Sharp, 4K, 60 fps). Native (with HEVC, on displays wider than
+4K) sends the full pixel size at up to 24 Mbit/s and about 24 fps. Almost nothing is sent
+while the screen doesn't change. When the screen stops changing, the picture is
 sent again a few times so text sharpens; the fps counter then drops, which is expected. On a phone, the screen works as a trackpad: drag to move the pointer, tap
 to click, two fingers to scroll, pinch to zoom, press and hold to drag; the Keyboard button
-opens the phone's keyboard, with a bar for ⌘, ⌥, ⌃, ⇧, Esc, Tab and the arrows.
+opens the phone's keyboard, with a bar for the modifier keys, Esc, Tab and the arrows. The
+**Keys** menu has shortcuts the browser would take itself (per system: ⌘ Tab on a Mac, Alt
+Tab or the Start menu on Windows, Activities on Linux). Controlling a Mac from a PC (or the
+other way round), Ctrl and ⌘ swap places; the button next to it turns that off.
 
-The Mac stays awake and doesn't lock while a session runs. A Mac that is already locked, at
-the login window or asleep can't be shared yet.
+The computer stays awake and doesn't lock while a session runs. A computer that is already
+locked, at the login window or asleep can't be shared yet. On Windows, programs running as
+administrator and UAC prompts can't be controlled (Windows doesn't allow it). Clipboard
+sharing on Linux uses `wl-copy`/`wl-paste` (Wayland) or `xclip`/`xsel` (X11).
 
 macOS remembers the two permissions per app build. A Termlab built without a Developer ID
 signature asks again after each update.

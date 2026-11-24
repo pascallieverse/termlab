@@ -29,9 +29,9 @@ pub struct DisplayInfo {
 /// What the browser needs to set up its decoder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoConfig {
-    /// WebCodecs codec string, e.g. `avc1.4d0028`.
+    /// WebCodecs codec string, e.g. `avc1.640034` or `hvc1.1.6.L183.B0`.
     pub codec: String,
-    /// The `avcC` record (decoder configuration).
+    /// The `avcC` or `hvcC` record (decoder configuration).
     pub description: Vec<u8>,
     pub width: u32,
     pub height: u32,
@@ -51,17 +51,98 @@ pub enum Quality {
     Low,
     #[default]
     Balanced,
+    /// 4K.
     High,
+    /// The display at its full pixel size (6K on a 6K display): beyond 4K needs HEVC, and
+    /// the encoder manages fewer frames there.
+    Native,
 }
 
+/// The video format: H.264 works in every browser with WebCodecs; HEVC (H.265) gives a
+/// sharper picture for the same bits and goes beyond 4K, where the browser can decode it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Codec {
+    #[default]
+    H264,
+    Hevc,
+}
+
+/// How a stream is encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Encoding {
+    pub codec: Codec,
+    /// The level it comes from (the software encoder sets its sharpness by it).
+    pub quality: Quality,
+    /// Largest width in pixels (the display's own size when smaller).
+    pub max_width: u32,
+    pub fps: u32,
+    /// Average bits per second.
+    pub bitrate: u32,
+    /// Full colour detail (YUV 4:4:4, HEVC only): coloured text stays crisp instead of
+    /// getting colour fringes from colour stored at half resolution.
+    pub chroma444: bool,
+    /// Draw the pointer into the picture (a browser that draws it itself says so).
+    pub draw_cursor: bool,
+}
+
+/// What the browser said it can do (its `codecs` message).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Browser {
+    /// The widest HEVC picture it decodes, 0 for none.
+    pub hevc: u32,
+    /// The widest HEVC 4:4:4 picture it decodes, 0 for none.
+    pub hevc444: u32,
+    /// It draws the pointer itself (from `cursor` messages).
+    pub cursor: bool,
+}
+
+/// Widest H.264 picture: the hardware encoders stop at 4096, and 4K keeps the level common.
+const H264_MAX_WIDTH: u32 = 3840;
+
 impl Quality {
-    /// (largest width in pixels, frames per second, average bits per second)
-    pub fn params(self) -> (u32, u32, u32) {
-        match self {
+    /// How to encode at this level for `browser`.
+    pub fn encoding(self, browser: Browser) -> Encoding {
+        let (max_width, fps, bitrate) = match self {
             Quality::Low => (1280, 30, 1_500_000),
             Quality::Balanced => (1920, 60, 6_000_000),
-            // Up to 4K: a Retina display at its full pixel size, for 1:1 viewing.
-            Quality::High => (3840, 60, 16_000_000),
+            Quality::High | Quality::Native => (H264_MAX_WIDTH, 60, 16_000_000),
+        };
+        let draw_cursor = !browser.cursor;
+        let sharp = matches!(self, Quality::High | Quality::Native);
+        match (self, browser.hevc) {
+            (_, 0) => Encoding {
+                codec: Codec::H264,
+                quality: self,
+                max_width,
+                fps,
+                bitrate,
+                chroma444: false,
+                draw_cursor,
+            },
+            // An M4 encodes 6016×3384 HEVC at about 24 fps (4K: over 50).
+            (Quality::Native, w) => Encoding {
+                codec: Codec::Hevc,
+                quality: self,
+                max_width: w,
+                fps: 30,
+                bitrate: 24_000_000,
+                chroma444: browser.hevc444 >= w,
+                draw_cursor,
+            },
+            (_, w) => {
+                let max_width = max_width.min(w);
+                Encoding {
+                    codec: Codec::Hevc,
+                    quality: self,
+                    max_width,
+                    fps,
+                    bitrate,
+                    // Only for Sharp: it costs encoder time, and smaller pictures are scaled
+                    // down anyway, which blurs more than half-resolution colour does.
+                    chroma444: sharp && browser.hevc444 >= max_width,
+                    draw_cursor,
+                }
+            }
         }
     }
 }
@@ -128,6 +209,16 @@ pub enum FromBrowser {
     },
     #[serde(rename = "clipboard.get")]
     ClipboardGet,
+    /// What the browser can do: the widest HEVC picture it decodes (0 for none: H.264
+    /// only), the same for HEVC 4:4:4, and whether it draws the pointer itself.
+    Codecs {
+        #[serde(default)]
+        hevc: u32,
+        #[serde(default)]
+        hevc444: u32,
+        #[serde(default)]
+        cursor: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -140,6 +231,8 @@ pub enum PointerAction {
 
 /// One input event for the platform layer, in global screen coordinates (points).
 #[derive(Debug, Clone)]
+// Click counts and key repeats only matter to macOS (Windows and X11 work them out).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum InputEvent {
     Move {
         x: f64,
@@ -183,36 +276,82 @@ pub fn avc_codec(avcc: &[u8]) -> Option<String> {
         .then(|| format!("avc1.{:02x}{:02x}{:02x}", avcc[1], avcc[2], avcc[3]))
 }
 
-/// AVCC (length-prefixed NAL units) to Annex B (start codes), with the parameter sets of
-/// `avcc` first on key frames. For the `probe` file only.
-pub fn annex_b(avcc_record: &[u8], frame: &[u8], key: bool) -> Vec<u8> {
+/// The WebCodecs codec string for an `hvcC` record (ISO/IEC 14496-15, annex E):
+/// `hvc1.<space><profile>.<compatibility, bit-reversed>.<tier><level>.<constraints>`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn hevc_codec(hvcc: &[u8]) -> Option<String> {
+    if hvcc.len() < 13 || hvcc[0] != 1 {
+        return None;
+    }
+    let space = ["", "A", "B", "C"][(hvcc[1] >> 6) as usize];
+    let tier = if hvcc[1] & 0x20 != 0 { 'H' } else { 'L' };
+    let profile = hvcc[1] & 0x1f;
+    let compat = u32::from_be_bytes([hvcc[2], hvcc[3], hvcc[4], hvcc[5]]).reverse_bits();
+    let level = hvcc[12];
+    let mut constraints = &hvcc[6..12];
+    while let [rest @ .., 0] = constraints {
+        constraints = rest;
+    }
+    let mut out = format!("hvc1.{space}{profile}.{compat:X}.{tier}{level}");
+    for b in constraints {
+        out.push_str(&format!(".{b:X}"));
+    }
+    Some(out)
+}
+
+/// The parameter sets (SPS, PPS; for HEVC also VPS) in a decoder configuration record.
+pub fn parameter_sets(codec: Codec, record: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    let nal = |i: &mut usize| -> Option<&[u8]> {
+        let len = record.get(*i..*i + 2)?;
+        let len = u16::from_be_bytes([len[0], len[1]]) as usize;
+        let n = record.get(*i + 2..*i + 2 + len)?;
+        *i += 2 + len;
+        Some(n)
+    };
+    match codec {
+        Codec::H264 => {
+            let mut i = 5;
+            for count_mask in [0x1f, 0xff] {
+                let Some(&count) = record.get(i) else { break };
+                i += 1;
+                for _ in 0..(count & count_mask) {
+                    let Some(n) = nal(&mut i) else { return out };
+                    out.push(n);
+                }
+            }
+        }
+        Codec::Hevc => {
+            let mut i = 22;
+            let Some(&arrays) = record.get(i) else {
+                return out;
+            };
+            i += 1;
+            for _ in 0..arrays {
+                let Some(count) = record.get(i + 1..i + 3) else {
+                    return out;
+                };
+                let count = u16::from_be_bytes([count[0], count[1]]);
+                i += 3;
+                for _ in 0..count {
+                    let Some(n) = nal(&mut i) else { return out };
+                    out.push(n);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Length-prefixed NAL units to Annex B (start codes), with the parameter sets of `record`
+/// first on key frames. For the `probe` file only.
+pub fn annex_b(codec: Codec, record: &[u8], frame: &[u8], key: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(frame.len() + 64);
     let start = [0u8, 0, 0, 1];
-    if key && avcc_record.len() > 6 {
-        let mut i = 5;
-        let sps = (avcc_record[i] & 0x1f) as usize;
-        i += 1;
-        for _ in 0..sps {
-            let Some(len) = avcc_record.get(i..i + 2) else {
-                break;
-            };
-            let len = u16::from_be_bytes([len[0], len[1]]) as usize;
-            i += 2;
+    if key {
+        for n in parameter_sets(codec, record) {
             out.extend_from_slice(&start);
-            out.extend_from_slice(avcc_record.get(i..i + len).unwrap_or_default());
-            i += len;
-        }
-        let pps = avcc_record.get(i).copied().unwrap_or(0) as usize;
-        i += 1;
-        for _ in 0..pps {
-            let Some(len) = avcc_record.get(i..i + 2) else {
-                break;
-            };
-            let len = u16::from_be_bytes([len[0], len[1]]) as usize;
-            i += 2;
-            out.extend_from_slice(&start);
-            out.extend_from_slice(avcc_record.get(i..i + len).unwrap_or_default());
-            i += len;
+            out.extend_from_slice(n);
         }
     }
     let mut i = 0;
@@ -287,6 +426,73 @@ mod tests {
     #[test]
     fn annex_b_replaces_length_prefixes() {
         let frame = [0, 0, 0, 2, 0x65, 0x88];
-        assert_eq!(annex_b(&[], &frame, false), vec![0, 0, 0, 1, 0x65, 0x88]);
+        assert_eq!(
+            annex_b(Codec::H264, &[], &frame, false),
+            vec![0, 0, 0, 1, 0x65, 0x88]
+        );
+    }
+
+    #[test]
+    fn hevc_codec_string() {
+        // Main profile, compatibility flags for Main and Main 10, level 5.1 (153), only the
+        // first constraint byte set: the example from the spec, `hvc1.1.6.L153.B0`.
+        let mut r = vec![1, 0x01, 0x60, 0, 0, 0, 0xb0, 0, 0, 0, 0, 0, 153];
+        r.extend_from_slice(&[0; 10]);
+        assert_eq!(hevc_codec(&r).as_deref(), Some("hvc1.1.6.L153.B0"));
+        r[1] = 0x21; // high tier
+        assert_eq!(hevc_codec(&r).as_deref(), Some("hvc1.1.6.H153.B0"));
+        assert_eq!(hevc_codec(&[0; 5]), None);
+    }
+
+    #[test]
+    fn parameter_sets_from_records() {
+        // avcC: one SPS [0x67, 1], one PPS [0x68].
+        let avcc = [1, 0x64, 0, 0x34, 0xff, 0xe1, 0, 2, 0x67, 1, 1, 0, 1, 0x68];
+        assert_eq!(
+            parameter_sets(Codec::H264, &avcc),
+            vec![&[0x67, 1][..], &[0x68][..]]
+        );
+        // hvcC: 22 header bytes, then 2 arrays (VPS, SPS) of one NAL each.
+        let mut hvcc = vec![1; 22];
+        hvcc.extend_from_slice(&[2, 0x20, 0, 1, 0, 1, 0x40, 0x21, 0, 1, 0, 2, 0x42, 7]);
+        assert_eq!(
+            parameter_sets(Codec::Hevc, &hvcc),
+            vec![&[0x40][..], &[0x42, 7][..]]
+        );
+    }
+
+    fn hevc(w: u32) -> Browser {
+        Browser {
+            hevc: w,
+            ..Browser::default()
+        }
+    }
+
+    #[test]
+    fn hevc_when_the_browser_decodes_it() {
+        assert_eq!(Quality::High.encoding(hevc(0)).codec, Codec::H264);
+        assert_eq!(Quality::Native.encoding(hevc(0)).max_width, 3840);
+        let e = Quality::High.encoding(hevc(7680));
+        assert_eq!((e.codec, e.max_width), (Codec::Hevc, 3840));
+        let e = Quality::Native.encoding(hevc(7680));
+        assert_eq!((e.codec, e.max_width), (Codec::Hevc, 7680));
+        let e = Quality::Balanced.encoding(hevc(3840));
+        assert_eq!((e.codec, e.max_width), (Codec::Hevc, 1920));
+        assert!(e.draw_cursor && !e.chroma444);
+    }
+
+    #[test]
+    fn full_colour_for_sharp_where_decoded() {
+        let b = Browser {
+            hevc: 7680,
+            hevc444: 3840,
+            cursor: true,
+        };
+        let e = Quality::High.encoding(b);
+        assert!(e.chroma444 && !e.draw_cursor);
+        assert!(!Quality::Balanced.encoding(b).chroma444);
+        // 4:4:4 only up to 4K here, so Native (wider) stays 4:2:0.
+        assert!(!Quality::Native.encoding(b).chroma444);
+        assert!(!Quality::High.encoding(Browser { hevc444: 0, ..b }).chroma444);
     }
 }

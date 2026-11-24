@@ -1,6 +1,7 @@
 //! One screen session: the websocket to the server, the capture stream, and the browser's
 //! input.
 
+use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,15 +13,16 @@ use base64::engine::general_purpose::STANDARD as B64;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-use crate::platform::{self, Input, Stream};
+use crate::platform::{self, Input, Video};
 use crate::proto::{
-    FromBrowser, InputEvent, PointerAction, Quality, annex_b, button_index, video_frame,
+    Browser, Encoding, FromBrowser, InputEvent, PointerAction, Quality, annex_b, button_index,
+    video_frame,
 };
+use crate::system::{self, MAX_CLIPBOARD};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Sharing switched on and off in Termlab's settings (written by the app).
@@ -34,9 +36,12 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often to tell macOS the user is active (no screensaver, no lock, while controlled).
 const AWAKE_EVERY: Duration = Duration::from_secs(30);
 const MAX_TEXT: usize = 10_000;
-const MAX_CLIPBOARD: usize = 1 << 20;
 /// How long the person at the computer has to allow a session.
 const CONFIRM_SECS: u32 = 60;
+/// HEVC level 6.2 tops out at 8192 pixels wide.
+const MAX_HEVC_WIDTH: u32 = 8192;
+/// How often the pointer is looked at (when the browser draws it).
+const CURSOR_TICK: Duration = Duration::from_millis(16);
 
 /// What termlabd passes on stdin.
 #[derive(Deserialize)]
@@ -129,90 +134,6 @@ async fn send_json(ws: &mut Ws, v: Value) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Asks the person at this computer. True when they allow it.
-async fn confirm(viewer: &str) -> bool {
-    let who = if viewer.is_empty() {
-        "Someone signed in to your Termlab server"
-    } else {
-        viewer
-    };
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!(
-        "display dialog \"Allow remote control of this computer?\\n\\n{}\\nwants to see your screen and use your mouse and keyboard, through your Termlab server.\" \
-         with title \"Termlab\" buttons {{\"Deny\", \"Allow\"}} default button \"Deny\" cancel button \"Deny\" with icon caution giving up after {CONFIRM_SECS}",
-        esc(who)
-    );
-    let out = tokio::process::Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(script)
-        .kill_on_drop(true)
-        .output();
-    match tokio::time::timeout(Duration::from_secs(u64::from(CONFIRM_SECS) + 5), out).await {
-        Ok(Ok(o)) => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            o.status.success()
-                && text.contains("button returned:Allow")
-                && !text.contains("gave up:true")
-        }
-        _ => false,
-    }
-}
-
-/// Keeps the display on while the session runs (`caffeinate` ends with this process).
-fn keep_awake() -> Option<std::process::Child> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
-    std::process::Command::new("/usr/bin/caffeinate")
-        .args(["-d", "-i", "-w", &std::process::id().to_string()])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()
-}
-
-/// Counts as user activity: no screensaver and no screen lock while someone is connected.
-fn declare_activity() {
-    if cfg!(target_os = "macos") {
-        let _ = std::process::Command::new("/usr/bin/caffeinate")
-            .args(["-u", "-t", "1"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
-}
-
-async fn clipboard_get() -> Option<String> {
-    let out = tokio::process::Command::new("/usr/bin/pbpaste")
-        .output()
-        .await
-        .ok()?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    if text.len() > MAX_CLIPBOARD {
-        let mut end = MAX_CLIPBOARD;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
-    }
-    Some(text)
-}
-
-async fn clipboard_set(text: &str) -> bool {
-    let Ok(mut child) = tokio::process::Command::new("/usr/bin/pbcopy")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-    else {
-        return false;
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(text.as_bytes()).await;
-    }
-    child.wait().await.map(|s| s.success()).unwrap_or(false)
-}
-
 /// Removes the "session running" file when the session ends, however it ends.
 struct ActiveFile(PathBuf);
 
@@ -239,11 +160,12 @@ impl Drop for ActiveFile {
 }
 
 fn start_stream(
-    display: u32,
-    quality: Quality,
+    id: u32,
+    enc: Encoding,
     tx: &tokio::sync::mpsc::UnboundedSender<crate::proto::Encoded>,
-) -> anyhow::Result<Stream> {
-    tokio::task::block_in_place(|| Stream::start(display, quality, tx.clone()))
+) -> anyhow::Result<Box<dyn Video>> {
+    tracing::info!(?enc, id, "stream");
+    tokio::task::block_in_place(|| platform::start(id, enc, tx.clone()))
 }
 
 pub async fn serve() -> anyhow::Result<()> {
@@ -277,8 +199,11 @@ async fn run(launch: &Launch) -> anyhow::Result<()> {
         )
         .await;
     }
+    platform::set_data_dir(&launch.data_dir);
     let perms = platform::permissions();
-    if !perms.screen {
+    // Linux under Wayland: the desktop asks on the computer itself the first time.
+    let desktop_asks = cfg!(target_os = "linux") && !perms.screen;
+    if !perms.screen && !desktop_asks {
         return fail(
             &mut ws,
             "Termlab isn't allowed to record this computer's screen. Allow it on the computer: Termlab › Settings › Remote access.",
@@ -287,12 +212,19 @@ async fn run(launch: &Launch) -> anyhow::Result<()> {
     }
     if settings(&launch.data_dir).confirm {
         send_json(&mut ws, json!({ "type": "status", "state": "confirming" })).await?;
-        if !confirm(&launch.viewer).await {
+        if !system::confirm(&launch.viewer, CONFIRM_SECS).await {
             return fail(&mut ws, "The person at the computer didn't allow it.").await;
         }
     }
 
-    let displays = tokio::task::block_in_place(platform::displays)?;
+    if desktop_asks {
+        send_json(&mut ws, json!({ "type": "status", "state": "confirming" })).await?;
+    }
+    let displays = match tokio::task::block_in_place(platform::displays) {
+        Ok(d) => d,
+        Err(e) => return fail(&mut ws, &e.to_string()).await,
+    };
+    let perms = platform::permissions();
     let mut display = displays
         .first()
         .map(|d| d.id)
@@ -308,9 +240,12 @@ async fn run(launch: &Launch) -> anyhow::Result<()> {
     .await?;
 
     let _active = ActiveFile::write(&launch.data_dir, &launch.viewer);
-    let mut awake = keep_awake();
+    let awake = system::keep_awake();
     let (tx, mut rx) = unbounded_channel();
-    let mut stream = start_stream(display, quality, &tx)?;
+    // What the browser can do (it says so right after the hello); until then H.264, which
+    // every browser with WebCodecs plays, with the pointer drawn in.
+    let mut browser = Browser::default();
+    let mut stream = start_stream(display, quality.encoding(browser), &tx)?;
     let mut input = Input::new();
     let mut seq: u32 = 0;
     let mut last_ack = Instant::now();
@@ -320,7 +255,12 @@ async fn run(launch: &Launch) -> anyhow::Result<()> {
     ping.reset();
     let mut refine = tokio::time::interval(platform::REFINE_TICK);
     refine.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    declare_activity();
+    let mut cursor_tick = tokio::time::interval(CURSOR_TICK);
+    cursor_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Pointer pictures the browser has, and the last position it was told.
+    let mut shapes_sent: HashSet<u32> = HashSet::new();
+    let mut cursor_sent: Option<(i64, i64, bool, u32)> = None;
+    system::declare_activity();
 
     let result: anyhow::Result<()> = loop {
         tokio::select! {
@@ -352,7 +292,8 @@ async fn run(launch: &Launch) -> anyhow::Result<()> {
                         if id != display && displays.iter().any(|d| d.id == id) {
                             display = id;
                             drop(stream);
-                            stream = start_stream(display, quality, &tx)?;
+                            stream = start_stream(display, quality.encoding(browser), &tx)?;
+                            cursor_sent = None;
                             send_json(&mut ws, json!({ "type": "display", "display": display })).await?;
                         }
                     }
@@ -360,9 +301,22 @@ async fn run(launch: &Launch) -> anyhow::Result<()> {
                         if q != quality {
                             quality = q;
                             drop(stream);
-                            stream = start_stream(display, quality, &tx)?;
+                            stream = start_stream(display, quality.encoding(browser), &tx)?;
                             send_json(&mut ws, json!({ "type": "quality", "quality": quality })).await?;
                         }
+                    }
+                    FromBrowser::Codecs { hevc, hevc444, cursor } => {
+                        let next = Browser {
+                            hevc: if platform::HEVC { hevc.min(MAX_HEVC_WIDTH) } else { 0 },
+                            hevc444: if platform::HEVC444 { hevc444.min(MAX_HEVC_WIDTH) } else { 0 },
+                            cursor,
+                        };
+                        if quality.encoding(next) != quality.encoding(browser) {
+                            drop(stream);
+                            stream = start_stream(display, quality.encoding(next), &tx)?;
+                        }
+                        browser = next;
+                        cursor_sent = None;
                     }
                     FromBrowser::Pointer { x, y, action, button, clicks } if perms.input => {
                         let (gx, gy) = at(x, y);
@@ -386,18 +340,22 @@ async fn run(launch: &Launch) -> anyhow::Result<()> {
                     FromBrowser::Release => input.apply(InputEvent::ReleaseAll),
                     FromBrowser::ClipboardSet { text } => {
                         if text.len() <= MAX_CLIPBOARD {
-                            let ok = clipboard_set(&text).await;
+                            let ok = system::clipboard_set(&text).await;
                             send_json(&mut ws, json!({ "type": "clipboard.saved", "ok": ok })).await?;
                         }
                     }
                     FromBrowser::ClipboardGet => {
-                        let text = clipboard_get().await.unwrap_or_default();
+                        let text = system::clipboard_get().await.unwrap_or_default();
                         send_json(&mut ws, json!({ "type": "clipboard", "text": text })).await?;
                     }
                     _ => {}
                 }
             }
             _ = tick.tick() => {
+                if let Some(why) = stream.failed() {
+                    let _ = send_json(&mut ws, json!({ "type": "error", "message": format!("The screen capture stopped: {why}") })).await;
+                    break Ok(());
+                }
                 if stream.inflight() > 0 && last_ack.elapsed() > ACK_TIMEOUT {
                     stream.reset_window();
                     last_ack = Instant::now();
@@ -407,21 +365,40 @@ async fn run(launch: &Launch) -> anyhow::Result<()> {
                     break Ok(());
                 }
                 if last_awake.elapsed() > AWAKE_EVERY {
-                    declare_activity();
+                    system::declare_activity();
                     last_awake = Instant::now();
                 }
             }
             _ = ping.tick() => { ws.send(Message::Ping(Vec::new().into())).await?; }
             _ = refine.tick() => stream.refine(),
+            _ = cursor_tick.tick(), if browser.cursor => {
+                let Some(c) = stream.cursor() else { continue };
+                if let Some(shape) = &c.shape && shapes_sent.insert(shape.id) {
+                    send_json(&mut ws, json!({
+                        "type": "cursor.shape", "id": shape.id, "width": shape.width,
+                        "height": shape.height, "hot_x": shape.hot_x, "hot_y": shape.hot_y,
+                        "scale": shape.scale, "rgba": B64.encode(&shape.rgba),
+                    })).await?;
+                }
+                // Where on the shown display, 0..1 (outside: on another display).
+                let b = stream.bounds();
+                let (x, y) = ((c.x - b.x) / b.w.max(1.0), (c.y - b.y) / b.h.max(1.0));
+                let id = c.shape.as_ref().map_or(0, |s| s.id);
+                let now = ((x * 1e5).round() as i64, (y * 1e5).round() as i64, c.visible, id);
+                if cursor_sent != Some(now) {
+                    cursor_sent = Some(now);
+                    send_json(&mut ws, json!({
+                        "type": "cursor", "x": now.0 as f64 / 1e5, "y": now.1 as f64 / 1e5,
+                        "visible": c.visible, "id": id,
+                    })).await?;
+                }
+            }
         }
     };
 
     input.apply(InputEvent::ReleaseAll);
     drop(stream);
-    if let Some(mut c) = awake.take() {
-        let _ = c.kill();
-        let _ = c.wait();
-    }
+    drop(awake);
     let _ = ws.close(None).await;
     result
 }
@@ -440,14 +417,41 @@ pub async fn probe(secs: u64, out: PathBuf) -> anyhow::Result<()> {
         Ok("high") => Quality::High,
         _ => Quality::Balanced,
     };
-    let stream = start_stream(display, quality, &tx)?;
+    // PROBE_HEVC=<widest picture> encodes HEVC (as when a browser says it decodes that).
+    let hevc = std::env::var("PROBE_HEVC")
+        .ok()
+        .and_then(|w| w.parse::<u32>().ok())
+        .map_or(0, |w| w.min(MAX_HEVC_WIDTH));
+    let enc = quality.encoding(Browser {
+        hevc,
+        hevc444: if std::env::var_os("PROBE_444").is_some() {
+            hevc
+        } else {
+            0
+        },
+        cursor: std::env::var_os("PROBE_NO_CURSOR").is_some(),
+    });
+    let stream = start_stream(display, enc, &tx)?;
     eprintln!("capture started in {:?}", started.elapsed());
     let mut file = std::fs::File::create(&out)?;
     let mut avcc = Vec::new();
     let (mut frames, mut keys, mut bytes) = (0u32, 0u32, 0usize);
     let mut asked_key = false;
     let end = Instant::now() + Duration::from_secs(secs);
+    let mut cursor_at = Instant::now();
     loop {
+        if cursor_at.elapsed() >= Duration::from_secs(1) {
+            cursor_at = Instant::now();
+            if let Some(c) = stream.cursor() {
+                let shape = c.shape.as_ref().map(|s| {
+                    format!(
+                        "#{} {}x{} hot {},{} scale {}",
+                        s.id, s.width, s.height, s.hot_x, s.hot_y, s.scale
+                    )
+                });
+                eprintln!("cursor: {:.0},{:.0} {shape:?}", c.x, c.y);
+            }
+        }
         let left = end.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;
@@ -477,7 +481,7 @@ pub async fn probe(secs: u64, out: PathBuf) -> anyhow::Result<()> {
                     f.data.len(),
                     if f.key { "  key" } else { "" }
                 );
-                file.write_all(&annex_b(&avcc, &f.data, f.key))?;
+                file.write_all(&annex_b(enc.codec, &avcc, &f.data, f.key))?;
                 stream.ack();
             }
             Ok(None) => break,

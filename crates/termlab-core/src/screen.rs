@@ -39,7 +39,7 @@ pub struct ActiveSession {
 
 /// Screen sharing works on this operating system.
 pub const fn supported() -> bool {
-    cfg!(target_os = "macos")
+    cfg!(any(target_os = "macos", windows, target_os = "linux"))
 }
 
 pub fn settings_path(dir: &Path) -> PathBuf {
@@ -77,7 +77,19 @@ fn alive(pid: u32) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-#[cfg(not(unix))]
+/// `tasklist` lists the process (without opening a console window).
+#[cfg(windows)]
+fn alive(pid: u32) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&format!("\"{pid}\"")))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn alive(_pid: u32) -> bool {
     true
 }

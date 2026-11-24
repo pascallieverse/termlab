@@ -258,6 +258,7 @@ function ScreenSharing({
 }) {
   const [s, setS] = useState<ScreenStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [approving, setApproving] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -275,7 +276,7 @@ function ScreenSharing({
   if (!s.supported) {
     return (
       <Group title="Screen sharing">
-        <Row title="Not available yet" desc="Seeing and controlling this computer's screen from your server works on macOS for now." />
+        <Row title="Not available" desc="Seeing and controlling this computer's screen from your server works on macOS, Windows and Linux." />
       </Group>
     );
   }
@@ -286,6 +287,20 @@ function ScreenSharing({
       setS(await api.screenSet(enabled, confirm));
     } catch (err) {
       setError(String(err));
+    }
+  }
+
+  /** Wayland: the desktop shows its own dialog now; the approval is kept for later sessions. */
+  async function approve() {
+    setError(null);
+    setApproving(true);
+    try {
+      await api.screenRequestPermission("screen");
+      setS(await api.screenStatus());
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setApproving(false);
     }
   }
 
@@ -339,7 +354,29 @@ function ScreenSharing({
           onChange={(e) => void set(s.enabled, e.target.checked)}
         />
       </label>
-      {s.enabled && (
+      {s.enabled && s.os === "windows" && (
+        <Row
+          title="Limits"
+          desc="Windows doesn't let a program see the lock screen or a UAC prompt, or control programs running as administrator."
+        />
+      )}
+      {s.enabled && s.os === "linux" && s.wayland && (
+        <Row
+          title="Desktop approval"
+          desc={
+            s.screenAllowed
+              ? "Approved: sessions start without anyone at this computer."
+              : "Your desktop asks once which screen to share and whether to allow control. Until then, someone has to approve each session here."
+          }
+        >
+          {!s.screenAllowed && (
+            <button className="btn small primary" disabled={approving} onClick={() => void approve()}>
+              {approving ? "Waiting…" : "Approve…"}
+            </button>
+          )}
+        </Row>
+      )}
+      {s.enabled && s.os === "macos" && (
         <>
           <Row
             title="Screen Recording"

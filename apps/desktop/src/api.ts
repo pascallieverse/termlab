@@ -256,6 +256,9 @@ export interface RemoteStatus {
 
 export type ScreenStatus = {
   supported: boolean;
+  os: "macos" | "windows" | "linux" | string;
+  /** Linux: a Wayland session (the desktop approves screen sharing once, instead of permissions). */
+  wayland: boolean;
   enabled: boolean;
   /** Ask on this computer before each session. */
   confirm: boolean;

@@ -60,7 +60,7 @@ Agents without hooks get their status from the terminal screen instead.
   its session.
 - **Remote access, on your own server.** Run `termlab-server` on a small VPS and link Termlab
   to it in Settings › Remote access, then watch sessions, answer approvals and type into
-  terminals from a browser or your phone, see and control a Mac's screen, get push
+  terminals from a browser or your phone, see and control a computer's screen, get push
   notifications, and send signed webhooks when sessions change. Nothing goes through a third
   party. See
   [docs/self-hosting.md](docs/self-hosting.md).

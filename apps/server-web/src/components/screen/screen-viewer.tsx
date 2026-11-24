@@ -8,19 +8,12 @@ import { Icon } from '@/layouts/nav';
 import { useLive } from '@/live/LiveProvider';
 import { ApiError, api, errorMessage } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { SHORTCUTS, codeForChar, isMacBrowser, mapCode } from './keys';
-import { ScreenClient, webCodecsAvailable, type Quality, type ScreenHello, type ScreenState, type ScreenStats } from './screen-client';
+import { codeForChar, defaultSwap, isMacTarget, mapCode, modifiers, shortcuts } from './keys';
+import { ScreenClient, webCodecsAvailable, type CursorShape, type Quality, type RemoteCursor, type ScreenHello, type ScreenState, type ScreenStats } from './screen-client';
 
 type Phase = { kind: 'starting' } | { kind: 'code'; error: string | null } | { kind: 'session'; sid: string } | { kind: 'failed'; message: string };
 type Fit = 'fit' | 'actual';
 type TouchMode = 'trackpad' | 'touch';
-
-const MODIFIERS = [
-    { code: 'MetaLeft', label: '⌘' },
-    { code: 'AltLeft', label: '⌥' },
-    { code: 'ControlLeft', label: '⌃' },
-    { code: 'ShiftLeft', label: '⇧' },
-];
 
 const KEYBAR: { label: string; code: string; title: string }[] = [
     { label: 'Esc', code: 'Escape', title: 'Escape' },
@@ -35,6 +28,37 @@ const KEYBAR: { label: string; code: string; title: string }[] = [
 
 /** Keep this much text in the hidden phone-keyboard field, so Backspace has something to delete. */
 const KB_PAD = '  ';
+
+/** Browsers don't show cursor images larger than this (CSS pixels). */
+const MAX_CSS_CURSOR = 128;
+
+/**
+ * The computer's pointer picture as a CSS cursor, `w`×`h` CSS pixels: candidates from best
+ * (sharp on high-density screens) to plainest, for browsers that reject the first.
+ */
+function cssCursor(shape: CursorShape, w: number, h: number): string[] {
+    const dpr = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
+    const png = (f: number) => {
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(w * f));
+        c.height = Math.max(1, Math.round(h * f));
+        const ctx = c.getContext('2d');
+        if (ctx) {
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(shape.image, 0, 0, c.width, c.height);
+        }
+
+        return c.toDataURL('image/png');
+    };
+    const hx = Math.min(w - 1, Math.round((shape.hotX * w) / shape.width));
+    const hy = Math.min(h - 1, Math.round((shape.hotY * h) / shape.height));
+    const one = png(1);
+    const plain = `url(${one}) ${hx} ${hy}, default`;
+    if (dpr === 1) return [plain];
+    const set = `url(${one}) 1x, url(${png(dpr)}) ${dpr}x`;
+
+    return [`image-set(${set}) ${hx} ${hy}, default`, `-webkit-image-set(${set}) ${hx} ${hy}, default`, plain];
+}
 
 /**
  * Seeing and controlling a computer's screen. Opens over everything (the sessions keep
@@ -191,7 +215,7 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
     const [pan, setPan] = useState({ x: 0, y: 0 });
     const touchDevice = useMemo(() => matchMedia('(pointer: coarse)').matches, []);
     const [touchMode, setTouchMode] = useState<TouchMode>('trackpad');
-    const [swap, setSwap] = useState(() => !isMacBrowser());
+    const [swap, setSwap] = useState(false);
     const [latched, setLatched] = useState<string[]>([]);
     const [keyboardOpen, setKeyboardOpen] = useState(false);
     const [menu, setMenu] = useState<'keys' | 'clipboard' | null>(null);
@@ -199,6 +223,19 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
     const [fullscreen, setFullscreen] = useState(false);
     const canControl = hello?.input ?? false;
     const live = state.state === 'live';
+    const overlayRef = useRef<HTMLCanvasElement>(null);
+    /** The computer's pointer, as last heard (positions from here while a finger moves it). */
+    const remote = useRef<RemoteCursor | null>(null);
+    /** A mouse is over the picture: the browser's own pointer shows the computer's shape. */
+    const hovering = useRef(false);
+    const localUntil = useRef(0);
+    const cursorCache = useRef(new Map<string, string[]>());
+    const view = useRef<{ layout: { w: number; h: number; left: number; top: number } | null; pointsWide: number; control: boolean; live: boolean }>({
+        layout: null,
+        pointsWide: 0,
+        control: false,
+        live: false,
+    });
 
     // The session itself.
     useEffect(() => {
@@ -208,6 +245,7 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
             onState: setState,
             onHello: (h) => {
                 setHello(h);
+                setSwap(defaultSwap(h.os));
                 setDisplay(h.display);
                 setQuality(h.quality);
             },
@@ -220,6 +258,12 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
             },
             onClipboardSaved: (ok) => (ok ? toast.success('Copied to the computer’s clipboard.') : toast.error('The computer’s clipboard couldn’t be set.')),
             onStats: setStats,
+            onCursor: (c) => {
+                // A finger just moved it: keep showing where the finger put it.
+                const prev = remote.current;
+                remote.current = performance.now() < localUntil.current && prev ? { ...c, x: prev.x, y: prev.y } : c;
+                paintCursor();
+            },
         });
         clientRef.current = client;
 
@@ -260,6 +304,100 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
 
         return { w, h, left: clamp((area.w - w) / 2 + pan.x, w, area.w), top: clamp((area.h - h) / 2 + pan.y, h, area.h) };
     }, [video, area, fit, zoom, pan]);
+
+    // ---- the computer's pointer -------------------------------------------------------------
+
+    /**
+     * Shows the computer's pointer: as the browser's own pointer while a mouse is over the
+     * picture (it moves at once, the shape follows the computer), otherwise drawn over the
+     * picture where the computer has it.
+     */
+    const paintCursor = useCallback(() => {
+        const el = canvasRef.current;
+        const ov = overlayRef.current;
+        if (!el || !ov) return;
+        const { layout: l, pointsWide, control, live: on } = view.current;
+        const c = remote.current;
+        const local = hovering.current && control;
+        const fallback = control ? 'default' : 'not-allowed';
+        const shape = c?.shape ?? null;
+        // CSS pixels per display point, and the picture's size on screen.
+        const k = l && pointsWide ? l.w / pointsWide : 0;
+        let w = shape ? (shape.width / shape.scale) * k : 0;
+        let h = shape ? (shape.height / shape.scale) * k : 0;
+        const fit = Math.min(1, MAX_CSS_CURSOR / Math.max(w, h, 1));
+        w = Math.max(1, Math.round(w * fit));
+        h = Math.max(1, Math.round(h * fit));
+
+        if (!local || !c) {
+            el.style.cursor = fallback;
+        } else if (!c.visible) {
+            el.style.cursor = 'none';
+        } else if (shape && k) {
+            const key = `${shape.id}:${w}x${h}`;
+            let css = cursorCache.current.get(key);
+            if (!css) {
+                if (cursorCache.current.size > 64) cursorCache.current.clear();
+                css = cssCursor(shape, w, h);
+                cursorCache.current.set(key, css);
+            }
+            for (const candidate of css) {
+                el.style.cursor = candidate;
+                if (el.style.cursor && el.style.cursor !== fallback) break;
+            }
+        } else {
+            el.style.cursor = fallback;
+        }
+
+        const show = on && !local && !!c && c.visible && !!shape && !!l && k > 0 && c.x >= 0 && c.x <= 1 && c.y >= 0 && c.y <= 1;
+        if (!show || !shape || !l || !c) {
+            ov.style.display = 'none';
+            return;
+        }
+        if (ov.dataset.id !== String(shape.id)) {
+            ov.dataset.id = String(shape.id);
+            ov.width = shape.width;
+            ov.height = shape.height;
+            const ctx = ov.getContext('2d');
+            ctx?.clearRect(0, 0, ov.width, ov.height);
+            ctx?.drawImage(shape.image, 0, 0);
+        }
+        const sx = w / shape.width;
+        const sy = h / shape.height;
+        ov.style.display = 'block';
+        ov.style.width = `${w}px`;
+        ov.style.height = `${h}px`;
+        ov.style.transform = `translate(${l.left + c.x * l.w - shape.hotX * sx}px, ${l.top + c.y * l.h - shape.hotY * sy}px)`;
+    }, []);
+
+    const pointsWide = hello?.displays.find((d) => d.id === display)?.width ?? 0;
+    useLayoutEffect(() => {
+        view.current = { layout, pointsWide, control: canControl, live };
+        paintCursor();
+    }, [layout, pointsWide, canControl, live, paintCursor]);
+
+    /** Moved here (a finger, in trackpad mode): show it there before the computer says so. */
+    const movedLocally = (x: number, y: number) => {
+        localUntil.current = performance.now() + 400;
+        if (remote.current) {
+            remote.current = { ...remote.current, x, y };
+            paintCursor();
+        }
+    };
+
+    const onPointerEnter = (e: React.PointerEvent<HTMLCanvasElement>) => {
+        if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
+            hovering.current = true;
+            paintCursor();
+        }
+    };
+
+    const onPointerLeave = (e: React.PointerEvent<HTMLCanvasElement>) => {
+        if (hovering.current && (e.pointerType === 'mouse' || e.pointerType === 'pen')) {
+            hovering.current = false;
+            paintCursor();
+        }
+    };
 
     // ---- mouse ---------------------------------------------------------------------------
 
@@ -359,6 +497,10 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
         const c = clientRef.current;
         if (!c) return;
         if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
+            if (!hovering.current) {
+                hovering.current = true;
+                paintCursor();
+            }
             const p = norm(e.clientX, e.clientY);
             sendMove(p.x, p.y);
             return;
@@ -399,6 +541,7 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
                 y: Math.min(1, Math.max(0, cursor.current.y + (dy * speed) / r.height)),
             };
             sendMove(cursor.current.x, cursor.current.y);
+            movedLocally(cursor.current.x, cursor.current.y);
             follow(cursor.current.x, cursor.current.y);
         } else {
             const p = norm(e.clientX, e.clientY);
@@ -577,6 +720,10 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
     };
 
     const displays = hello?.displays ?? [];
+    // Native only differs from Sharp on displays wider than 4K.
+    const shown = displays.find((d) => d.id === display);
+    // Beyond 4K needs HEVC, which only Macs encode.
+    const nativeWide = shown && isMacTarget(hello?.os) && Math.round(shown.width * shown.scale) > 3840 ? Math.round(shown.width * shown.scale) : 0;
 
     return (
         <div ref={rootRef} className="flex min-h-0 flex-1 flex-col bg-black">
@@ -595,7 +742,8 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
                 <select className="hchip cursor-pointer bg-transparent" aria-label="Picture quality" value={quality} onChange={(e) => clientRef.current?.quality(e.target.value as Quality)}>
                     <option value="low">Low (data saver)</option>
                     <option value="balanced">Balanced</option>
-                    <option value="high">Sharp</option>
+                    <option value="high">Sharp (4K)</option>
+                    {(nativeWide > 0 || quality === 'native') && <option value="native">Native{nativeWide ? ` (${nativeWide} px, fewer fps)` : ''}</option>}
                 </select>
                 {!touchDevice && (
                     <button type="button" className={cn('hchip', fit === 'actual' && 'on')} aria-pressed={fit === 'actual'} onClick={() => setFit(fit === 'fit' ? 'actual' : 'fit')} title="Show one screen pixel per pixel">
@@ -617,14 +765,20 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
                         Keyboard
                     </button>
                 )}
-                {canControl && !isMacBrowser() && (
-                    <button type="button" className={cn('hchip', swap && 'on')} aria-pressed={swap} onClick={() => setSwap(!swap)} title="Use Ctrl as the Mac’s ⌘ key">
-                        Ctrl = ⌘
+                {canControl && hello && defaultSwap(hello.os) && (
+                    <button
+                        type="button"
+                        className={cn('hchip', swap && 'on')}
+                        aria-pressed={swap}
+                        onClick={() => setSwap(!swap)}
+                        title={isMacTarget(hello.os) ? 'Use Ctrl as the Mac’s ⌘ key' : 'Use ⌘ as the computer’s Ctrl key'}
+                    >
+                        {isMacTarget(hello.os) ? 'Ctrl = ⌘' : '⌘ = Ctrl'}
                     </button>
                 )}
                 {canControl && (
                     <Menu label="Keys" open={menu === 'keys'} onOpen={(o) => setMenu(o ? 'keys' : null)}>
-                        {SHORTCUTS.map((s) => (
+                        {shortcuts(hello?.os).map((s) => (
                             <button key={s.label} type="button" className="menu-item" onClick={() => { clientRef.current?.combo(s.mods, s.code); setMenu(null); }}>
                                 {s.label}
                             </button>
@@ -660,13 +814,17 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
                     width={16}
                     height={9}
                     className={cn('screen-canvas absolute touch-none select-none', !live && 'opacity-0')}
-                    style={layout ? { width: layout.w, height: layout.h, left: layout.left, top: layout.top, cursor: canControl ? 'default' : 'not-allowed' } : { width: 0, height: 0 }}
+                    style={layout ? { width: layout.w, height: layout.h, left: layout.left, top: layout.top } : { width: 0, height: 0 }}
+                    onPointerEnter={onPointerEnter}
+                    onPointerLeave={onPointerLeave}
                     onPointerDown={onPointerDown}
                     onPointerMove={onPointerMove}
                     onPointerUp={onPointerUp}
                     onPointerCancel={onPointerUp}
                     onContextMenu={(e) => e.preventDefault()}
                 />
+                {/* The computer's pointer, when the browser's own isn't over the picture. */}
+                <canvas ref={overlayRef} aria-hidden className="pointer-events-none absolute top-0 left-0 hidden origin-top-left" />
                 {state.state !== 'live' && (
                     <div className="absolute inset-0 grid place-items-center p-4">
                         <Card>
@@ -705,7 +863,7 @@ function Session({ sid, name, onClose, onRestart, toast }: { sid: string; name: 
 
             {canControl && touchDevice && (
                 <div className="screen-keys flex shrink-0 gap-1 overflow-x-auto border-t border-line bg-surface px-1.5 py-1.5 pb-[max(6px,env(safe-area-inset-bottom))] [scrollbar-width:none]">
-                    {MODIFIERS.map((m) => {
+                    {modifiers(hello?.os).map((m) => {
                         const on = latched.includes(m.code);
 
                         return (
@@ -788,7 +946,7 @@ function StatusChip({ state, stats }: { state: ScreenState; stats: ScreenStats |
                 : 'Connecting';
 
     return (
-        <span className="hchip shrink-0 tabular-nums">
+        <span className="hchip shrink-0 tabular-nums" title={stats && stats.width ? `${stats.codec} ${stats.width}×${stats.height}` : undefined}>
             <span aria-hidden="true" className="dot" style={{ background: color }} />
             {label}
         </span>
