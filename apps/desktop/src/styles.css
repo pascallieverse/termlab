@@ -146,6 +146,102 @@ h1, h2, h3 { margin: 0; }
 .tag { font-size: 12px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--outline-strong); color: var(--muted); white-space: nowrap; }
 .tag.live { border-color: #5b9bff66; color: #a8ccff; }
 
+/* ---- labels ---- */
+/* A session label: a dot of its colour (`--label-color`, set from the label) and its name,
+   on a tint of the same colour. */
+.label-chip {
+  display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; height: 18px; padding: 0 7px 0 6px;
+  border-radius: 999px; font-size: 10.5px; font-weight: 600; line-height: 1; white-space: nowrap;
+  color: color-mix(in oklab, var(--label-color) 72%, white);
+  background: color-mix(in oklab, var(--label-color) 20%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--label-color) 38%, transparent);
+}
+.label-chip-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--label-color); }
+.label-chip-name { overflow: hidden; text-overflow: ellipsis; }
+.label-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
+/* Where there's no room for names (a pane's one-line header): short bars, so they don't read
+   as status dots. */
+.label-dots { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; }
+.label-dot { width: 14px; height: 6px; border-radius: 3px; background: var(--label-color); }
+/* The sidebar's label filter: one label at a time. */
+.label-filter { display: flex; flex-wrap: wrap; gap: 5px; max-height: 82px; overflow-y: auto; }
+.label-filter button { display: inline-flex; min-width: 0; max-width: 100%; padding: 0; border: 0; border-radius: 999px; background: transparent; }
+.label-filter .label-chip { height: 24px; padding: 0 10px 0 8px; font-size: 11px; font-weight: 500; }
+.label-filter button:hover .label-chip { background: color-mix(in oklab, var(--label-color) 30%, transparent); }
+.label-filter button.on .label-chip {
+  color: var(--text); box-shadow: inset 0 0 0 1.5px var(--label-color);
+  background: color-mix(in oklab, var(--label-color) 38%, transparent);
+}
+.label-filter button.off:not(:hover) .label-chip { opacity: 0.45; }
+/* In the open session's header: its labels, or a quiet way to add the first. */
+.labels-btn {
+  display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; padding: 2px; margin: -2px;
+  border: 0; border-radius: 999px; background: transparent; color: var(--faint); font-size: 12px;
+}
+.labels-btn.empty { padding: 2px 6px; margin: -2px -6px; }
+.labels-btn.empty:hover { color: var(--text); background: var(--hover); }
+.labels-btn:not(.empty):hover .label-chip { background: color-mix(in oklab, var(--label-color) 32%, transparent); }
+
+/* The labels dialog: one field to find or create, the list below it. */
+.label-dialog-session { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.label-search {
+  display: flex; align-items: center; gap: 10px; padding: 0 22px; height: 52px; flex: none;
+  border-bottom: 1px solid var(--border); color: var(--faint);
+}
+.label-search input {
+  flex: 1; min-width: 0; height: 100%; border: 0; outline: none; background: transparent; color: var(--text); font-size: 14px;
+}
+.label-search input::placeholder { color: var(--faint); }
+.label-picker { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 10px; }
+.label-list { display: flex; flex-direction: column; gap: 1px; min-height: 44px; }
+.label-option {
+  display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 4px 0 12px;
+  border-radius: 8px; cursor: pointer;
+}
+.label-option.is-active { background: var(--row-hover); }
+.label-option .label-chip { height: 24px; padding: 0 11px 0 9px; gap: 7px; font-size: 12.5px; font-weight: 500; }
+.label-option .label-chip-dot { width: 8px; height: 8px; }
+.label-check {
+  flex: none; width: 17px; height: 17px; display: grid; place-items: center; border-radius: 5px;
+  border: 1.5px solid var(--outline-strong); color: var(--on-accent);
+}
+.label-check.on { background: var(--accent); border-color: var(--accent); }
+.label-used { min-width: 16px; text-align: right; font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.label-edit { opacity: 0; }
+.label-option.is-active .label-edit, .label-edit:focus-visible { opacity: 1; }
+.label-create {
+  display: flex; flex-direction: column; gap: 8px; padding: 8px 12px 10px; border-radius: 8px;
+}
+.label-create.is-active { background: var(--row-hover); }
+.label-create-btn {
+  display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 28px; padding: 0; border: 0;
+  background: transparent; color: var(--text-2); font-size: 13px; text-align: left;
+}
+.label-create-btn .label-chip { height: 24px; padding: 0 11px 0 9px; gap: 7px; font-size: 12.5px; font-weight: 500; }
+.label-create-btn .label-chip-dot { width: 8px; height: 8px; }
+.label-empty { padding: 12px; font-size: 13px; line-height: 1.5; color: var(--muted); }
+.label-editor {
+  display: flex; flex-direction: column; gap: 10px; margin: 2px 0; padding: 10px 12px;
+  border-radius: 10px; background: var(--raised); border: 1px solid var(--border-strong);
+}
+.label-editor-row { display: flex; align-items: center; gap: 10px; }
+.label-editor-dot { flex: none; width: 12px; height: 12px; border-radius: 50%; background: var(--label-color); }
+.label-editor .input { height: 34px; background: var(--bg); }
+.label-editor-actions { display: flex; align-items: center; gap: 6px; }
+.labels-foot { padding: 12px 22px; flex-wrap: nowrap; }
+.labels-hint { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.swatches { display: flex; flex-wrap: wrap; gap: 4px; }
+.swatch { position: relative; display: grid; place-items: center; width: 28px; height: 28px; cursor: pointer; }
+.swatch > span[aria-hidden] { width: 18px; height: 18px; border-radius: 50%; background: var(--label-color); transition: transform 100ms ease; }
+.swatch:hover > span[aria-hidden] { transform: scale(1.12); }
+.swatch input:checked + span { box-shadow: 0 0 0 2px var(--card), 0 0 0 3.5px var(--label-color); }
+.label-editor .swatch input:checked + span { box-shadow: 0 0 0 2px var(--raised), 0 0 0 3.5px var(--label-color); }
+.label-create.is-active .swatch input:checked + span { box-shadow: 0 0 0 2px var(--row-hover), 0 0 0 3.5px var(--label-color); }
+.swatch input:focus-visible + span { outline: 2px solid var(--running); outline-offset: 4px; }
+.swatches.small .swatch { width: 24px; height: 24px; }
+.swatches.small .swatch > span[aria-hidden] { width: 14px; height: 14px; }
+@media (prefers-reduced-motion: reduce) { .swatch > span[aria-hidden] { transition: none; } }
+
 /* ---- layout ---- */
 
 .app { height: 100%; display: flex; flex-direction: column; }
@@ -324,7 +420,8 @@ h1, h2, h3 { margin: 0; }
 .session-row.is-selected { background: var(--selected); border-color: var(--selected-border); }
 .row-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .row-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.row-meta { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); }
+/* Labels follow the status, or take the next line when they don't fit beside it. */
+.row-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: 11.5px; color: var(--muted); }
 .row-time { align-self: flex-start; padding-top: 2px; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
 .monogram { flex: 0 0 auto; display: grid; place-items: center; font-family: var(--font-mono); font-weight: 600; }
@@ -588,6 +685,7 @@ h1, h2, h3 { margin: 0; }
 .tile { display: flex; flex-direction: column; gap: 12px; padding: 14px; border-radius: 12px; background: var(--card); border: 1px solid var(--border); }
 .tile-head { display: flex; align-items: center; gap: 10px; }
 .tile-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.tile-title .label-chips { padding-top: 3px; }
 .tile-title h3 { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tile-preview {
   font-size: 12px; line-height: 1.65; background: var(--terminal); border: 1px solid var(--selected);

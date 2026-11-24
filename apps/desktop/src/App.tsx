@@ -11,6 +11,7 @@ import { Palette } from "./Palette";
 import { SessionPane } from "./SessionPane";
 import { Sidebar } from "./Sidebar";
 import { ConfirmDialog, RenameDialog, SubagentDialog } from "./SmallDialogs";
+import { LabelsDialog } from "./Labels";
 import { SettingsDialog } from "./SettingsDialog";
 import { UpdateBanner, startUpdateChecks } from "./updates";
 import { StoreProvider, useStore } from "./store";
@@ -100,6 +101,7 @@ function Shell() {
       {store.broadcastFor !== null && <BroadcastDialog />}
       {store.envFolder && <EnvDialog key={store.envFolder.id} folder={store.envFolder} />}
       {store.renameFor && <RenameDialog />}
+      {store.labelsFor && <LabelsDialog />}
       {store.subagentView && <SubagentDialog />}
       {store.settingsOpen && <SettingsDialog />}
       {store.confirmRequest && <ConfirmDialog />}

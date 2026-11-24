@@ -55,7 +55,7 @@ export function Palette() {
         id: `s:${s.id}`,
         group: `Sessions in ${f ? tildify(f.path, store.home) : "?"}`,
         label: s.title,
-        keywords: `${AGENTS[s.agent].name} ${f?.name ?? ""} ${s.model ?? ""}`,
+        keywords: `${AGENTS[s.agent].name} ${f?.name ?? ""} ${s.model ?? ""} ${store.labelsOf(s.id).map((l) => l.name).join(" ")}`,
         kind: "session",
         icon: <Monogram agent={s.agent} size={26} />,
         right: (
@@ -81,6 +81,15 @@ export function Palette() {
         icon: <Icon name="arrow" size={16} />,
         right: shortcutLabel("handOff") ? <Kbd>{shortcutLabel("handOff")}</Kbd> : undefined,
         run: () => store.setHandOffFor(current.id),
+      });
+      out.push({
+        id: "c:labels",
+        group: "Actions",
+        label: `Label “${current.title}”`,
+        keywords: "labels tag color colour",
+        kind: "command",
+        icon: <Icon name="tag" size={16} />,
+        run: () => store.setLabelsFor(current.id),
       });
     }
     out.push({

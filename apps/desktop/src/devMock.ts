@@ -3,7 +3,7 @@
 
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import type { Channel } from "@tauri-apps/api/core";
-import type { AgentInfo, Folder, Session } from "./api";
+import type { AgentInfo, Folder, LabelBook, Session } from "./api";
 
 const now = Date.now();
 const min = 60_000;
@@ -42,6 +42,16 @@ function session(p: Partial<Session> & Pick<Session, "id" | "folderId" | "agent"
     ...p,
   };
 }
+
+const labelBook: LabelBook = {
+  labels: [
+    { id: 1, name: "Bug", color: "red" },
+    { id: 2, name: "Client work", color: "blue" },
+    { id: 3, name: "Waiting on review", color: "yellow" },
+  ],
+  sessions: { s1: [1, 3], s3: [2], s6: [3] },
+};
+const copyLabels = (): LabelBook => structuredClone(labelBook);
 
 const sessions: Session[] = [
   session({
@@ -177,6 +187,34 @@ export function install() {
         const saved = text.trim() ? { text, updatedAt: Date.now() } : { text: "", updatedAt: null };
         notes.set(a.project as string, saved);
         return saved;
+      }
+      if (cmd === "read_labels") return copyLabels();
+      if (cmd === "save_label") {
+        const name = (a.name as string).trim().replace(/\s+/g, " ");
+        const taken = labelBook.labels.find((l) => l.id !== a.id && l.name.toLowerCase() === name.toLowerCase());
+        if (taken) throw `There's already a label named “${taken.name}”.`;
+        let label = labelBook.labels.find((l) => l.id === a.id);
+        if (label) Object.assign(label, { name, color: a.color as string });
+        else {
+          label = { id: Math.max(0, ...labelBook.labels.map((l) => l.id)) + 1, name, color: a.color as string };
+          labelBook.labels.push(label);
+        }
+        return { label: { ...label }, book: copyLabels() };
+      }
+      if (cmd === "delete_label") {
+        labelBook.labels = labelBook.labels.filter((l) => l.id !== a.id);
+        for (const [session, ids] of Object.entries(labelBook.sessions)) {
+          const kept = ids.filter((id) => id !== a.id);
+          if (kept.length > 0) labelBook.sessions[session] = kept;
+          else delete labelBook.sessions[session];
+        }
+        return copyLabels();
+      }
+      if (cmd === "set_session_labels") {
+        const kept = labelBook.labels.map((l) => l.id).filter((id) => (a.labels as number[]).includes(id));
+        if (kept.length > 0) labelBook.sessions[a.session as string] = kept;
+        else delete labelBook.sessions[a.session as string];
+        return copyLabels();
       }
       if (cmd !== "daemon_call") return null;
       const req = a.request as { method: string; params?: Record<string, unknown> };

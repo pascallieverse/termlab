@@ -24,6 +24,20 @@ export interface ProjectNotes {
   updatedAt: number | null;
 }
 
+/** A label the user made: a name and a colour (see sessionLabels.ts), put on any number of sessions. */
+export interface Label {
+  id: number;
+  name: string;
+  color: string;
+}
+
+/** Every label, and the labels of each session that has any (kept by the app, see labels.rs). */
+export interface LabelBook {
+  labels: Label[];
+  /** Session id → the ids of its labels. */
+  sessions: Record<string, number[]>;
+}
+
 export interface ApprovalOption {
   number: number;
   label: string;
@@ -283,6 +297,15 @@ export const api = {
   removeFolder: (id: number) => call<null>("removeFolder", { id }),
   /** A project's notes, by its folder's path. */
   readProjectNotes: (project: string) => invoke<ProjectNotes>("read_project_notes", { project }),
+  readLabels: () => invoke<LabelBook>("read_labels"),
+  /** Makes a label (`id` null) or changes one's name and colour. */
+  saveLabel: (id: number | null, name: string, color: string) =>
+    invoke<{ label: Label; book: LabelBook }>("save_label", { id, name, color }),
+  /** Removes a label, from every session too. */
+  deleteLabel: (id: number) => invoke<LabelBook>("delete_label", { id }),
+  /** Replaces one session's labels. */
+  setSessionLabels: (session: string, labels: number[]) =>
+    invoke<LabelBook>("set_session_labels", { session, labels }),
   /** Remote screen sharing: the switch, macOS permissions and the session running now. */
   screenStatus: () => invoke<ScreenStatus>("screen_status"),
   screenSet: (enabled: boolean, confirm: boolean) => invoke<ScreenStatus>("screen_set", { enabled, confirm }),

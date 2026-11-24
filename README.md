@@ -77,6 +77,10 @@ Agents without hooks get their status from the terminal screen instead.
 - **Notifications** when a session needs you, finishes or fails.
 - **On hold.** Park a session so it stops counting towards attention badges and notifications,
   without stopping its process.
+- **Labels.** Make your own coloured labels ("Bug", "Client work", "Waiting on review") and
+  put them on sessions: right-click a session and choose **Labels…**. They show in the
+  sidebar, the session's header and Mission control, and the sidebar filters and searches by
+  them.
 - **Sessions survive the app.** A per-user background service owns the terminals. Close the
   window, reopen it, and the scrollback is replayed.
 - **⌘K command palette** and keyboard shortcuts for everything, all rebindable.

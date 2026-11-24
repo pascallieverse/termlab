@@ -8,6 +8,7 @@ import { useStore, type InspectorTab, type Tab } from "./store";
 import { Icon, Monogram, StatusPill } from "./ui";
 import { useDetails } from "./useDetails";
 import { shortcutHint } from "./shortcuts";
+import { LabelsButton } from "./Labels";
 
 /** The selected session: header with tabs, terminal (or diff/timeline), approval bar, composer. */
 export function SessionPane({ session: s }: { session: Session }) {
@@ -34,6 +35,7 @@ export function SessionPane({ session: s }: { session: Session }) {
                 <span className="mono">⎇ {details.branch}</span>
               </>
             )}
+            <LabelsButton sessionId={s.id} />
           </div>
         </div>
         <StatusPill session={s} />

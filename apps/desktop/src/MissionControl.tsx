@@ -7,6 +7,7 @@ import { sessionMenu } from "./sessionMenu";
 import { useStore } from "./store";
 import { Icon, Monogram, StatusPill } from "./ui";
 import { shortcutLabel } from "./shortcuts";
+import { SessionLabels } from "./Labels";
 
 type GroupBy = "folder" | "agent" | "status";
 
@@ -138,6 +139,7 @@ function Tile({ session: s, onMenu }: { session: Session; onMenu(e: ReactMouseEv
             {AGENTS[s.agent].name}
             {s.model ? <span className="mono"> · {s.model}</span> : null}
           </span>
+          <SessionLabels sessionId={s.id} />
         </div>
         <StatusPill session={s} compact />
       </div>

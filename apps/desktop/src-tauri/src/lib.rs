@@ -3,6 +3,7 @@
 
 mod commands;
 mod daemon;
+mod labels;
 mod project_env;
 mod project_notes;
 mod screen;
@@ -53,6 +54,10 @@ pub fn run() {
             project_env::save_project_env,
             project_notes::read_project_notes,
             project_notes::save_project_notes,
+            labels::read_labels,
+            labels::save_label,
+            labels::delete_label,
+            labels::set_session_labels,
             screen::screen_status,
             screen::screen_set,
             screen::screen_request_permission,

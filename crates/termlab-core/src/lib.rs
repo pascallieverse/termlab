@@ -8,6 +8,7 @@ pub mod error;
 pub mod git;
 pub mod hooks;
 pub mod ipc;
+pub mod labels;
 pub mod model;
 pub mod notes;
 pub mod pty;

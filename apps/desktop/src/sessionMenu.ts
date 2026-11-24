@@ -27,6 +27,7 @@ export function sessionMenu(store: Store, s: Session): MenuItem[] {
       },
     },
     { label: "Rename…", onSelect: () => store.setRenameFor(s.id) },
+    { label: "Labels…", onSelect: () => store.setLabelsFor(s.id) },
     {
       label: s.onHold ? "Take off hold" : "Put on hold",
       hint: s.onHold ? "Show in active session tabs again" : "Move to On hold; the process keeps running",

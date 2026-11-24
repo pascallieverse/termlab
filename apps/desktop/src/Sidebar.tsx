@@ -12,6 +12,7 @@ import { useStore } from "./store";
 import { matchesSessionFilter, type SessionFilter } from "./sessionFilters";
 import { Dot, Icon, Monogram, StatusText } from "./ui";
 import { shortcutHint } from "./shortcuts";
+import { LabelChip, SessionLabels } from "./Labels";
 
 /** Folder groups show this many sessions until expanded. */
 const GROUP_PREVIEW = 8;
@@ -43,6 +44,10 @@ export function Sidebar() {
   const { sessionFilter: filter, setSessionFilter: setFilter } = store;
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [collapsed, setCollapsed] = useState<Set<number>>(loadCollapsed);
+  const { labels, labelsOf } = store;
+  const [pickedLabel, setLabelFilter] = useState<number | null>(null);
+  // A label that has since been deleted filters nothing.
+  const labelFilter = labels.some((l) => l.id === pickedLabel) ? pickedLabel : null;
 
   const counts: Record<SessionFilter, number> = {
     all: sessions.filter((s) => matchesSessionFilter(s, "all")).length,
@@ -55,17 +60,19 @@ export function Sidebar() {
     const q = query.trim().toLowerCase();
     const match = (s: Session) =>
       matchesSessionFilter(s, filter) &&
+      (labelFilter === null || labelsOf(s.id).some((l) => l.id === labelFilter)) &&
       (!q ||
         s.title.toLowerCase().includes(q) ||
         AGENTS[s.agent].name.toLowerCase().includes(q) ||
-        (s.model ?? "").toLowerCase().includes(q));
+        (s.model ?? "").toLowerCase().includes(q) ||
+        labelsOf(s.id).some((l) => l.name.toLowerCase().includes(q)));
     return folders.map((f) => ({
       folder: f,
       sessions: sessions.filter((s) => s.folderId === f.id && match(s)),
     }));
-  }, [folders, sessions, query, filter]);
+  }, [folders, sessions, query, filter, labelFilter, labelsOf]);
 
-  const filtering = filter !== "all" || query.trim() !== "";
+  const filtering = filter !== "all" || query.trim() !== "" || labelFilter !== null;
 
   // The sessions as listed, top to bottom (respecting the filter, collapsed folders and
   // "Show more"), for PgUp / PgDn.
@@ -154,6 +161,21 @@ export function Sidebar() {
             </button>
           ))}
         </div>
+        {labels.length > 0 && (
+          <div role="group" aria-label="Show sessions labelled" className="label-filter">
+            {labels.map((l) => (
+              <button
+                key={l.id}
+                aria-pressed={labelFilter === l.id}
+                className={labelFilter === l.id ? "on" : labelFilter !== null ? "off" : ""}
+                title={labelFilter === l.id ? "Show all sessions" : `Show only sessions labelled ${l.name}`}
+                onClick={() => setLabelFilter(labelFilter === l.id ? null : l.id)}
+              >
+                <LabelChip label={l} />
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="sidebar-list" ref={order.list}>
@@ -367,6 +389,7 @@ function SessionRow({ session: s, onMenu, onSubagentMenu }: {
         <span className="row-meta">
           <Dot status={s.status} />
           <StatusText status={s.status} />
+          <SessionLabels sessionId={s.id} />
         </span>
       </span>
       <span className="row-time">{relativeTime(s.lastActivityAt)}</span>

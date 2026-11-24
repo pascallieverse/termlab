@@ -28,8 +28,11 @@ import {
   type AgentInfo,
   type DaemonStatus,
   type Folder,
+  type Label,
+  type LabelBook,
   type Session,
 } from "./api";
+import { NO_LABELS, labelsBySession, withSessionLabels } from "./sessionLabels";
 import { AGENTS, STATUS, homeFrom } from "./agents";
 import { matchesSessionFilter, type SessionFilter } from "./sessionFilters";
 import { getPrefs, usePrefs } from "./prefs";
@@ -79,6 +82,18 @@ interface Store {
   envFolder: Folder | null;
   setEnvFolder(folder: Folder | null): void;
   renameFor: string | null;
+  /** Every label, in the order they were made. */
+  labels: Label[];
+  /** A session's labels. */
+  labelsOf(sessionId: string): Label[];
+  /** The session whose labels are being chosen. */
+  labelsFor: string | null;
+  setLabelsFor(id: string | null): void;
+  /** Makes a label (`id` null) or changes one; answers with it as saved. */
+  saveLabel(id: number | null, name: string, color: string): Promise<Label | undefined>;
+  /** Removes a label, from every session too. */
+  deleteLabel(id: number): Promise<void>;
+  setSessionLabels(sessionId: string, ids: number[]): Promise<void>;
   /** The sub-agent whose steps are open. */
   subagentView: { sessionId: string; subagentId: string } | null;
   settingsOpen: boolean;
@@ -139,6 +154,8 @@ function remember(key: string, value: string) {
   }
 }
 
+const NONE: Label[] = [];
+
 const Ctx = createContext<Store | null>(null);
 
 export function useStore(): Store {
@@ -170,6 +187,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [broadcastFor, setBroadcastFor] = useState<number | null>(null);
   const [envFolder, setEnvFolder] = useState<Folder | null>(null);
   const [renameFor, setRenameFor] = useState<string | null>(null);
+  const [labelBook, setLabelBook] = useState<LabelBook>(NO_LABELS);
+  const labelBookRef = useRef(labelBook);
+  labelBookRef.current = labelBook;
+  const sessionLabels = useMemo(() => labelsBySession(labelBook), [labelBook]);
+  // The same function until the labels change, so lists that filter by label can keep theirs.
+  const labelsOf = useCallback((sessionId: string) => sessionLabels.get(sessionId) ?? NONE, [sessionLabels]);
+  const [labelsFor, setLabelsFor] = useState<string | null>(null);
+  const labelSaves = useRef(0);
   const [subagentView, setSubagentView] = useState<{ sessionId: string; subagentId: string } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
@@ -259,6 +284,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           void maybeNotify(e.session, prev);
         } else if (e.type === "sessionRemoved") {
           setSessions((list) => list.filter((x) => x.id !== e.id));
+          // Its labels go with it.
+          if (labelBookRef.current.sessions[e.id]) void api.setSessionLabels(e.id, []).then(setLabelBook, () => {});
         } else {
           void api.listFolders().then(setFolders, () => {});
         }
@@ -279,6 +306,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }
       }),
     ];
+    // Labels are the app's own: they don't wait for the background service.
+    void api.readLabels().then(setLabelBook, (e: unknown) => toast(errorText(e)));
     void api.daemonStatus().then((s) => {
       setDaemon(s);
       if (s.connected) {
@@ -287,7 +316,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
     });
     return () => unlisten.forEach((p) => p.then((f) => f()));
-  }, [reload, maybeNotify]);
+  }, [reload, maybeNotify, toast]);
 
   // Dock badge: sessions waiting on you.
   const { dockBadge } = usePrefs();
@@ -344,6 +373,33 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     envFolder,
     setEnvFolder,
     renameFor,
+    labels: labelBook.labels,
+    labelsOf,
+    labelsFor,
+    setLabelsFor,
+    async saveLabel(id, name, color) {
+      const saved = await run(() => api.saveLabel(id, name, color));
+      if (saved) setLabelBook(saved.book);
+      return saved?.label;
+    },
+    async deleteLabel(id) {
+      const book = await run(() => api.deleteLabel(id));
+      if (book) setLabelBook(book);
+    },
+    async setSessionLabels(sessionId, ids) {
+      // Shown at once, so a second change made before this one is saved builds on it.
+      setLabelBook((book) => withSessionLabels(book, sessionId, ids));
+      const save = ++labelSaves.current;
+      try {
+        const book = await api.setSessionLabels(sessionId, ids);
+        // An answer that a newer change has overtaken would undo it on screen for a moment.
+        if (save === labelSaves.current) setLabelBook(book);
+      } catch (e) {
+        toast(errorText(e));
+        // What's shown may not be what's saved: show what is.
+        void api.readLabels().then(setLabelBook, () => {});
+      }
+    },
     subagentView,
     settingsOpen,
     confirmRequest,
