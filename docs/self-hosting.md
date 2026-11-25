@@ -1,5 +1,8 @@
 # Self-hosting Termlab Server
 
+Remote access to your Claude Code, Codex, Mistral Vibe and Antigravity sessions from a
+browser or your phone, on a server you run yourself.
+
 `termlab-server` is your own server for Termlab. Your Termlab computers connect to it, and
 you open it in a browser or on your phone to:
 

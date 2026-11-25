@@ -2,7 +2,8 @@ name: Screenshots
 
 # Retakes the README screenshots (docs/screenshots/) whenever a release is published, so
 # they always show the released version. They come from the UI running on its mocked
-# daemon (apps/desktop/src/devMock.ts): sample data only, nothing from a real machine.
+# daemon (apps/desktop/src/devMock.ts) and the server web UI on its mock
+# (apps/server-web/src/mock.ts): sample data only, nothing from a real machine.
 on:
   release:
     types: [published]
@@ -27,13 +28,20 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
+          cache-dependency-path: |
+            apps/desktop/package-lock.json
+            apps/server-web/package-lock.json
 
       - name: Install
         working-directory: apps/desktop
         run: |
           npm ci
           npx playwright install --with-deps chromium
+
+      # server.png is taken from termlab-server's web UI, which has its own dependencies.
+      - name: Install the server web UI
+        working-directory: apps/server-web
+        run: npm ci
 
       - name: Take the screenshots
         working-directory: apps/desktop

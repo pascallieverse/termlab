@@ -3,12 +3,13 @@
 // release (.github/workflows/screenshots.yml); run it by hand with `npm run screenshots`.
 //
 // Writes docs/screenshots/termlab.png (the framed hero image), focus.png and
-// mission-control.png. Uses Playwright's Chromium; set PW_CHANNEL=chrome to use an
+// mission-control.png, plus server.png (termlab-server's web UI on its mock,
+// apps/server-web/src/mock.ts). Uses Playwright's Chromium; set PW_CHANNEL=chrome to use an
 // installed Google Chrome instead of downloading one.
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer } from "vite";
 import { chromium } from "playwright";
 
@@ -96,8 +97,86 @@ try {
   await frame.evaluate(() => Promise.all([document.querySelector("img").decode(), document.fonts.load("500 13px Inter")]));
   await writeFile(resolve(outDir, "termlab.png"), await frame.screenshot());
 
+  await serverShot(browser, inter);
+
   console.log(`Screenshots written to ${outDir}`);
 } finally {
   await browser.close();
   await server.close();
+}
+
+// termlab-server's web UI on its mock (apps/server-web/src/mock.ts): Mission control in a
+// browser window, with the phone view of an approval in front of it. Written to server.png.
+// The web UI has its own Vite (and version), so it runs from its own node_modules.
+async function serverShot(browser, inter) {
+  const webDir = resolve(appDir, "../server-web");
+  const { createServer: createWebServer } = await import(
+    pathToFileURL(resolve(webDir, "node_modules/vite/dist/node/index.js")).href
+  );
+  const web = await createWebServer({
+    root: webDir,
+    configFile: resolve(webDir, "vite.config.ts"),
+    logLevel: "warn",
+    server: { port: 1489, strictPort: false },
+  });
+  await web.listen();
+  const webUrl = `${web.resolvedUrls.local[0].replace(/\/$/, "")}/?mock=1`;
+  try {
+    const shoot = async (viewport, prepare) => {
+      const context = await browser.newContext({ viewport, deviceScaleFactor: SCALE, colorScheme: "dark", reducedMotion: "reduce" });
+      await context.route(/^https?:\/\/(?!localhost[:/])/, (route) => route.abort());
+      const page = await context.newPage();
+      page.on("pageerror", (e) => console.error("server page error:", e.message));
+      await page.goto(webUrl, { waitUntil: "networkidle" });
+      await page.evaluate(() => document.fonts.ready);
+      await prepare?.(page);
+      await page.waitForTimeout(800);
+      const png = await page.screenshot();
+      await context.close();
+      return png;
+    };
+    const desk = await shoot({ width: 1280, height: 800 }, (page) => page.getByRole("button", { name: "Mission control" }).click());
+    const phone = await shoot({ width: 390, height: 780 });
+
+    const W = 1280 + 300;
+    const H = 800 + 40 + 160;
+    const frame = await browser.newPage({ viewport: { width: W, height: H }, deviceScaleFactor: SCALE });
+    await frame.setContent(`<!doctype html>
+<html><head><style>
+  @font-face { font-family: Inter; font-weight: 500; src: url(data:font/woff2;base64,${inter}); }
+  html, body { margin: 0; }
+  body {
+    width: ${W}px; height: ${H}px; position: relative; overflow: hidden;
+    background: radial-gradient(120% 90% at 80% 0%, #6b4a12 0%, #2a1f0e 40%, #0b0c0e 100%);
+  }
+  .window {
+    position: absolute; left: 60px; top: 80px; width: 1280px; border-radius: 12px; overflow: hidden;
+    background: #0b0c0e; box-shadow: 0 0 0 1px rgba(255,255,255,.08), 0 30px 80px rgba(0,0,0,.55);
+  }
+  .bar { height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 14px; background: #1b1c20; }
+  .bar i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+  .bar span {
+    margin-left: 24px; flex: 0 1 520px; height: 26px; border-radius: 8px; background: #0f1013;
+    font: 500 13px/26px Inter, sans-serif; color: #9a9ca5; padding: 0 12px;
+  }
+  .window img { display: block; width: 1280px; height: 800px; }
+  .phone {
+    position: absolute; right: 50px; top: 150px; width: 390px; height: 780px; padding: 12px;
+    border-radius: 54px; background: #1b1c20;
+    box-shadow: 0 0 0 1px rgba(255,255,255,.12), 0 40px 90px rgba(0,0,0,.7);
+  }
+  .phone img { display: block; width: 390px; height: 780px; border-radius: 42px; }
+</style></head><body>
+  <div class="window">
+    <div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span>remote.example.com</span></div>
+    <img src="data:image/png;base64,${desk.toString("base64")}" alt="">
+  </div>
+  <div class="phone"><img src="data:image/png;base64,${phone.toString("base64")}" alt=""></div>
+</body></html>`);
+    await frame.evaluate(() => Promise.all([...document.images].map((i) => i.decode()).concat(document.fonts.load("500 13px Inter"))));
+    await writeFile(resolve(outDir, "server.png"), await frame.screenshot());
+    await frame.close();
+  } finally {
+    await web.close();
+  }
 }

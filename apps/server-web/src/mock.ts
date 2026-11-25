@@ -30,8 +30,8 @@ let sessions: RemoteSession[] = [
     }),
     session('a2', { title: 'Fix flaky auth tests', agent: 'codex', model: 'gpt-5-codex', branch: 'fix/auth-tests' }),
     session('a3', { project: 'web-app', title: 'Accessibility pass', status: 'done', preview: ['● Fixed 9 contrast issues', 'Done. All checks pass.'] }),
-    session('a4', { project: 'docs', title: 'Build API reference', agent: 'antigravity', status: 'error', preview: ['Error: cannot resolve ./openapi.yaml', 'Process exited with code 1'] }),
-    session('b1', { machine_id: 2, machine: 'build-box', project: 'infra', title: 'Upgrade Postgres', agent: 'vibe', status: 'idle' }),
+    session('a4', { project: 'docs', title: 'Build API reference', agent: 'antigravity', model: 'Gemini 3 Pro', status: 'error', preview: ['Error: cannot resolve ./openapi.yaml', 'Process exited with code 1'] }),
+    session('b1', { machine_id: 2, machine: 'build-box', project: 'infra', title: 'Upgrade Postgres', agent: 'vibe', model: 'Devstral', preview: ['● Upgraded postgres to 17.2', 'Done. Waiting for your next message.'], status: 'idle' }),
 ];
 
 let signedIn = true;
@@ -42,7 +42,7 @@ const json = (data: unknown, status = 200) =>
 
 const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 21 21"><rect width="21" height="21" fill="#fff"/><path d="M1 1h7v7H1zM13 1h7v7h-7zM1 13h7v7H1z" fill="#000"/></svg>';
 
-const PROJECT_NAMES = ['api-server', 'web-app', 'docs', 'brightness', 'democms'];
+const PROJECT_NAMES = ['api-server', 'web-app', 'docs', 'mobile-app', 'marketing-site'];
 let mockLabels = [
     { id: 1, name: 'Bug', color: 'red' },
     { id: 2, name: 'Client work', color: 'blue' },
@@ -116,7 +116,7 @@ export function installMock(mode: string): void {
                 sessions: sessions.map((s, i) => ({ ...s, directory: `/Users/me/Code/${s.project}`, project_order: i, created_at: Date.now() - i * 60_000, on_hold: s.id === 'a3' })),
                 notes: [{ machine_id: 1, path: '/Users/me/Code/api-server', text: '- Deploy with ./deploy.sh\n- Staging DB resets nightly', updated_at: Date.now() }],
                 projects: [
-                    { machine_id: 1, projects: [...new Set(sessions.filter((x) => x.machine_id === 1).map((x) => x.project)), 'brightness', 'democms'].map((name, i) => ({ id: i + 1, name, path: `/Users/me/Code/${name}`, order: i })), agents: [{ agent: 'claude', name: 'Claude Code', model_flag: true, models: ['opus', 'sonnet'] }, { agent: 'codex', name: 'Codex', model_flag: true, models: [] }, { agent: 'shell', name: 'Terminal', model_flag: false, models: [] }] },
+                    { machine_id: 1, projects: [...new Set(sessions.filter((x) => x.machine_id === 1).map((x) => x.project)), 'mobile-app', 'marketing-site'].map((name, i) => ({ id: i + 1, name, path: `/Users/me/Code/${name}`, order: i })), agents: [{ agent: 'claude', name: 'Claude Code', model_flag: true, models: ['opus', 'sonnet'] }, { agent: 'codex', name: 'Codex', model_flag: true, models: [] }, { agent: 'shell', name: 'Terminal', model_flag: false, models: [] }] },
                 ],
                 usage: [{ machine_id: 1, usage: [
                     { agent: 'claude', windows: [{ id: 'five_hour', usedPercentage: 68, resetsAt: Date.now() + 3_600_000 }, { id: 'seven_day', usedPercentage: 11, resetsAt: Date.now() + 86_400_000 * 3 }], updatedAt: Date.now() - 60_000, connected: true, plan: 'max' },

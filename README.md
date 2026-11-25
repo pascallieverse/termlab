@@ -6,12 +6,16 @@
 
 **A desktop session manager for AI coding agents: run Claude Code, Codex CLI, Mistral Vibe and Antigravity CLI side by side, and see at a glance which one needs you.**
 
+A GUI for running several Claude Code and Codex sessions in parallel, for macOS, Linux and
+Windows. With the self-hosted [Termlab Server](#termlab-server-remote-access-from-your-phone), you can
+answer agent permission prompts and type into their terminals from your phone.
+
 [![Latest release](https://img.shields.io/github/v/release/pascallieverse/termlab?label=download&sort=semver)](https://github.com/pascallieverse/termlab/releases/latest)
 [![CI](https://github.com/pascallieverse/termlab/actions/workflows/ci.yml/badge.svg)](https://github.com/pascallieverse/termlab/actions/workflows/ci.yml)
 ![Platforms: macOS, Linux, Windows](https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-informational)
 ![Built with Tauri, Rust and React](https://img.shields.io/badge/built%20with-Tauri%202%20%C2%B7%20Rust%20%C2%B7%20React-orange)
 
-[Download](#download) · [Features](#features) · [How it works](#how-it-works) · [FAQ](#faq) · [Development](#development)
+[Download](#download) · [Features](#features) · [Termlab Server](#termlab-server-remote-access-from-your-phone) · [How it works](#how-it-works) · [FAQ](#faq) · [Development](#development)
 
 <br>
 
@@ -58,12 +62,10 @@ Agents without hooks get their status from the terminal screen instead.
   (for API-key billing), changed files, a diff view and a timeline of prompts and tool calls.
 - **Subagents.** See an agent's running subagents (test runners, explorers, reviewers) under
   its session.
-- **Remote access, on your own server.** Run `termlab-server` on a small VPS and link Termlab
-  to it in Settings › Remote access, then watch sessions, answer approvals and type into
-  terminals from a browser or your phone, see and control a computer's screen, get push
-  notifications, send signed webhooks when sessions change, and start sessions from incoming
-  webhooks (GitHub, CI, a form). Nothing goes through a third party. See
-  [docs/self-hosting.md](docs/self-hosting.md).
+- **Remote access, on your own server.** Watch sessions, answer approvals and type into
+  terminals from a browser or your phone, with push notifications, webhooks and screen
+  sharing. Nothing goes through a third party. See
+  [Termlab Server](#termlab-server-remote-access-from-your-phone).
 - **Plan usage.** Your Claude and Codex plan limits in the header, so you know how much of the
   week is left.
 - **Resume, fork and hand off.** Pick up an earlier session, branch it, or hand the task to a
@@ -122,12 +124,65 @@ API keys or subscription credentials.
 > **System Settings → Privacy & Security** and choose **Open Anyway**. On Windows, SmartScreen
 > may warn before the installer runs.
 
+## Termlab Server: remote access from your phone
+
+<img src="docs/screenshots/server.png" alt="Termlab Server in a browser and on a phone: Mission control with Claude Code, Codex, Antigravity and Mistral Vibe sessions from two computers, and the phone view of a Claude Code permission request with Allow once, Always allow and Deny" width="100%">
+
+`termlab-server` is a small server you run yourself, on a VPS or a machine at home behind
+HTTPS. Your Termlab computers connect to it, and you open it in any browser or add it to your
+phone's home screen. Away from your desk you can:
+
+- **Answer approvals.** When Claude Code or Codex asks permission to run a command or edit a
+  file, you get a push notification, and **Allow once**, **Always allow** or **Deny** is one
+  tap.
+- **Use the terminal.** Open any session's live terminal, read what the agent did, type a
+  reply, stop it or put it on hold.
+- **Start new sessions** in any project on any linked computer: pick the agent, model and
+  permission mode (*Ask first*, *Auto-edit* or *Full auto*).
+- **See every computer at once.** Sessions from all your machines in one Focus view and one
+  Mission control, filtered per machine, with your Claude and Codex plan usage.
+- **Share the screen.** See a computer's desktop and use its mouse and keyboard (macOS,
+  Windows, Linux with X11 or Wayland). H.264 or HEVC, up to 4K at 60 fps, and on a phone it
+  works as a trackpad. It's off until you switch it on in Termlab on that computer.
+- **Send webhooks** to Slack, CI or your own scripts when a session needs you,
+  finishes, fails or starts. Each delivery is signed with HMAC-SHA256, and can carry a bearer
+  token, basic auth or your own headers.
+- **Start sessions from incoming webhooks.** Give GitHub, a CI pipeline or a form a secret
+  URL, and each call starts an agent session with a message built from the request
+  (`{{body.issue.title}}`, `{{query.x}}`). It can also pick the project and labels.
+
+**Private by design.** The server has one owner account, with a password and an
+authenticator app (TOTP). Each computer opens an outgoing websocket to it, so nothing has
+to be reachable at home. Terminal output passes through without being stored, and an audit
+log records every sign-in, approval, message and session start. There is no shared,
+hosted service: the only server that can reach your computers is yours.
+
+**Small.** One static binary (x86-64 or arm64 Linux) or a Docker image, with one SQLite file.
+256 MB of RAM is plenty. Put Caddy or nginx in front of it for HTTPS:
+
+```sh
+docker run -d --name termlab-server --restart unless-stopped \
+  -p 127.0.0.1:8484:8484 -v termlab-data:/data \
+  -e TERMLAB_PUBLIC_URL=https://remote.example.com \
+  ghcr.io/pascallieverse/termlab-server:latest
+```
+
+Then open the address, create the owner account with the setup token from
+`docker logs termlab-server`, and link each computer in Termlab under **Settings › Remote
+access** with a pairing code.
+
+- [**Self-hosting guide**](docs/self-hosting.md): install (Docker or systemd), HTTPS with
+  Caddy or nginx, pairing, screen sharing, settings, security, backups and upgrades.
+- [**API and protocol**](docs/server-protocol.md): the HTTP API, webhook payloads and
+  signatures, and the websocket protocol, for scripts and integrations.
+
 ## How it works
 
 ```
  Termlab.app (Tauri + React)  ⇄  termlabd (per-user daemon, owns the ptys)  ⇄  agent CLIs
-        unix socket: termlabd.sock          ↑ hook.sock
-                                            termlab-hook  ← run by Claude Code hooks / Codex notify
+        unix socket: termlabd.sock          ↑ hook.sock          ↓ outgoing websocket (optional)
+                                            termlab-hook         termlab-server  ⇄  browser / phone
+                                            ↑ run by Claude Code hooks / Codex notify
 ```
 
 - `crates/termlab-core`: everything except UI.
@@ -138,6 +193,9 @@ API keys or subscription credentials.
   and replays scrollback. The daemon exits after 10 idle minutes with no sessions.
 - `crates/termlab-hook`: a tiny forwarder that agents' hooks run. It never prints and always
   exits 0.
+- `crates/termlab-server`: the self-hosted server (axum, SQLite), with its web UI from
+  `apps/server-web` (React) built in. termlabd keeps the link to it up when one is set.
+- `crates/termlab-screen`: the screen-sharing helper that captures, encodes and takes input.
 - `apps/desktop`: the Tauri 2 app (`src-tauri/`) and React/Vite frontend (`src/`).
 - `design/`: the visual spec. `docs/agent-notes.md`: every agent flag and path as verified.
 
@@ -153,6 +211,20 @@ Everything stays on your machine. Data lives in `~/Library/Application Support/d
 **Is Termlab a replacement for Claude Code or Codex?**
 No. It runs the official CLIs unchanged, in a real terminal, and adds session management
 around them. Everything the CLI can do still works.
+
+**How do I run several Claude Code sessions in parallel?**
+Start them from **New session** (⌘N) in Termlab, in the same project or in different ones.
+Each runs in its own terminal. The sidebar and Mission control show which one is running,
+waiting for an approval or done, and split view shows up to six side by side.
+
+**Can I approve Claude Code or Codex permission prompts from my phone?**
+Yes, with [Termlab Server](#termlab-server-remote-access-from-your-phone) on your own server.
+Your phone gets a push notification when a session needs you, and you can allow or deny the
+request, or open the terminal and type a reply.
+
+**Does remote access go through a cloud service?**
+No. You run `termlab-server` yourself, and your computers connect only to it. There is no
+account with us and nothing in between.
 
 **Does it use my Claude or ChatGPT subscription, or an API key?**
 Whatever the agent itself is signed in with. Termlab shows which one each session uses, and
