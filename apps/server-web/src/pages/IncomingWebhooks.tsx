@@ -11,7 +11,7 @@ import { timeAgo } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { useLive } from '@/live/LiveProvider';
 import type { IncomingCall, IncomingHook, PermissionPreset, SessionLabel } from '@/types';
-import { Field, LabelChip, SecretValue, inputClass, labelHex, selectClass, useScrollIntoView } from './webhook-ui';
+import { Field, LabelChip, inputClass, labelHex, selectClass, useScrollIntoView } from './webhook-ui';
 
 const PERMISSIONS: { value: PermissionPreset; label: string; desc: string }[] = [
     { value: 'ask_first', label: 'Ask first', desc: 'You approve every edit and command, from here or the app.' },
@@ -221,15 +221,7 @@ export function IncomingWebhooks() {
                                         </div>
                                     </div>
                                 )}
-                                {on && (
-                                    <div
-                                        id={`hook-${h.id}`}
-                                        className="grid grid-cols-[repeat(auto-fit,minmax(min(320px,100%),1fr))] items-start gap-4 px-5 pb-5"
-                                    >
-                                        <UrlPanel key={h.id} hook={h} onChanged={refresh} />
-                                        <Calls calls={calls} onRefresh={() => void refresh()} />
-                                    </div>
-                                )}
+                                {on && <HookDetails key={h.id} hook={h} calls={calls} onChanged={refresh} onRefresh={() => void refresh()} />}
                             </div>
                         );
                     })
@@ -782,126 +774,175 @@ function TemplateHelp() {
     );
 }
 
-function UrlPanel({ hook, onChanged }: { hook: IncomingHook; onChanged: () => Promise<void> }) {
+/** An open webhook: its URL, then its recent calls, in one card. */
+function HookDetails({
+    hook,
+    calls,
+    onChanged,
+    onRefresh,
+}: {
+    hook: IncomingHook;
+    calls: IncomingCall[];
+    onChanged: () => Promise<void>;
+    onRefresh: () => void;
+}) {
     const toast = useToast();
     const [url, setUrl] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
-    const [confirm, setConfirm] = useState(false);
+    const [confirmRoll, setConfirmRoll] = useState(false);
 
-    async function reveal(path: 'url' | 'roll') {
+    async function fetchUrl(path: 'url' | 'roll'): Promise<string | null> {
         setBusy(true);
         try {
             const data = await api.post<{ url: string }>(`/api/incoming/${hook.id}/${path}`);
-            setUrl(data.url);
-            if (path === 'roll') {
-                toast.success('New URL made. The old one stopped working.');
-                await onChanged();
-            }
+            return data.url;
         } catch (e) {
             toast.error(errorMessage(e, 'Could not load the URL.'));
+
+            return null;
         } finally {
             setBusy(false);
-            setConfirm(false);
         }
     }
 
+    async function copy() {
+        // Copies without showing it.
+        const value = url ?? (await fetchUrl('url'));
+        if (!value) return;
+        try {
+            await navigator.clipboard.writeText(value);
+            toast.success('URL copied.');
+        } catch {
+            setUrl(value);
+            toast.error('Could not copy. Select the URL and copy it.');
+        }
+    }
+
+    async function roll() {
+        const value = await fetchUrl('roll');
+        setConfirmRoll(false);
+        if (!value) return;
+        setUrl(value);
+        toast.success('New URL made. The old one stopped working.');
+        await onChanged();
+    }
+
     return (
-        <section aria-labelledby={`url-heading-${hook.id}`} className="flex flex-col gap-3.5 rounded-[14px] border border-line bg-panel p-5">
-            <h2 id={`url-heading-${hook.id}`} className="m-0 text-[17px] font-semibold">
-                Webhook URL
-            </h2>
-            <p className="m-0 text-sm text-dim">
-                Made by this server for “{hook.name}”. Paste it where the other service asks for a webhook URL (in GitHub:
-                the repository's Settings › Webhooks); each <span className="font-mono text-ink-soft">POST</span> to it starts a
-                session. Keep it secret: the URL is the password.
-            </p>
-            <SecretValue masked={hook.url_hint} load={() => void reveal('url')} busy={busy} what="URL" value={url} onValue={setUrl} />
-            {hook.project_missing && (
-                <p role="alert" className="m-0 text-sm text-bad">
-                    {hook.project} is no longer on {hook.machine ?? 'the computer'}. Edit the webhook to pick a project.
-                </p>
-            )}
-            {confirm ? (
-                <div role="alert" className="flex flex-col gap-3 rounded-[10px] border border-bad-line bg-bad-bg p-3">
-                    <p className="m-0 text-sm text-ink">
-                        Make a new URL? The old one stops working right away, so update whatever calls it.
-                    </p>
-                    <div className="flex flex-wrap gap-2">
-                        <Button variant="danger" disabled={busy} onClick={() => void reveal('roll')}>
-                            Make new URL
-                        </Button>
-                        <Button variant="outline" onClick={() => setConfirm(false)}>
-                            Cancel
-                        </Button>
-                    </div>
+        <div id={`hook-${hook.id}`} className="mx-5 mb-5 overflow-hidden rounded-[12px] border border-line bg-panel">
+            <section aria-labelledby={`url-heading-${hook.id}`} className="flex flex-col gap-2.5 p-4">
+                <div className="flex items-center justify-between gap-3">
+                    <h3 id={`url-heading-${hook.id}`} className="m-0 text-sm font-semibold">
+                        Webhook URL
+                    </h3>
+                    {!confirmRoll && (
+                        <button
+                            type="button"
+                            onClick={() => setConfirmRoll(true)}
+                            className="cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 text-[13px] text-dim hover:bg-raised hover:text-ink"
+                        >
+                            Make a new URL
+                        </button>
+                    )}
                 </div>
-            ) : (
-                <div>
-                    <Button variant="outline" onClick={() => setConfirm(true)}>
-                        New URL
+                <div className="flex gap-2">
+                    <code className="flex min-h-10 min-w-0 flex-1 items-center overflow-x-auto whitespace-nowrap rounded-lg border border-line bg-bg px-3 font-mono text-[13px] text-ink-soft [scrollbar-width:thin]">
+                        {url ?? hook.url_hint}
+                    </code>
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        className="min-h-10"
+                        disabled={busy}
+                        onClick={async () => setUrl(url ? null : await fetchUrl('url'))}
+                    >
+                        {url ? 'Hide' : 'Reveal'}
+                    </Button>
+                    <Button variant="outline" size="sm" className="min-h-10" disabled={busy} onClick={() => void copy()}>
+                        Copy
                     </Button>
                 </div>
-            )}
-        </section>
-    );
-}
+                <p className="m-0 text-[13px] leading-relaxed text-dim">
+                    Paste it where the other service asks for a webhook URL (in GitHub: the repository's Settings › Webhooks).
+                    Each <span className="font-mono text-ink-soft">POST</span> starts a session. Anyone with the URL can call it,
+                    so keep it secret.
+                </p>
+                {confirmRoll && (
+                    <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-bad-line bg-bad-bg p-3">
+                        <p className="m-0 text-sm text-ink">The old URL stops working right away; update whatever calls it.</p>
+                        <div className="flex gap-2">
+                            <Button variant="danger" size="sm" disabled={busy} onClick={() => void roll()}>
+                                Make new URL
+                            </Button>
+                            <Button variant="outline" size="sm" onClick={() => setConfirmRoll(false)}>
+                                Cancel
+                            </Button>
+                        </div>
+                    </div>
+                )}
+                {hook.project_missing && (
+                    <p role="alert" className="m-0 text-sm text-bad">
+                        {hook.project} is no longer on {hook.machine ?? 'the computer'}. Edit the webhook to pick a project.
+                    </p>
+                )}
+            </section>
 
-function Calls({ calls, onRefresh }: { calls: IncomingCall[]; onRefresh: () => void }) {
-    return (
-        <section aria-labelledby="calls-heading" className="overflow-hidden rounded-[14px] border border-line bg-panel">
-            <div className="flex items-center justify-between gap-3 border-b border-line px-5 py-[18px]">
-                <h2 id="calls-heading" className="m-0 text-[17px] font-semibold">
-                    Recent calls
-                </h2>
-                <button
-                    type="button"
-                    onClick={onRefresh}
-                    className="cursor-pointer rounded-md px-2 py-1 text-[13px] text-dim hover:bg-raised hover:text-ink"
-                >
-                    Refresh
-                </button>
-            </div>
-            {calls.length === 0 ? (
-                <p className="m-0 px-5 py-6 text-dim">No calls yet. Reveal the URL and call it from the service that should start sessions.</p>
-            ) : (
-                <div className="relative overflow-x-auto">
-                    <table className="w-full min-w-[520px] border-collapse text-sm">
-                        <thead>
-                            <tr className="text-left text-[13px] text-dim">
-                                <th scope="col" className="px-5 py-2.5 font-medium">Result</th>
-                                <th scope="col" className="px-5 py-2.5 font-medium">From</th>
-                                <th scope="col" className="px-5 py-2.5 font-medium">When</th>
-                                <th scope="col" className="px-5 py-2.5 font-medium">
-                                    <span className="sr-only">Session</span>
-                                </th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {calls.map((c) => {
-                                const s = CALL[c.status];
-
-                                return (
-                                    <tr key={c.id} className="border-t border-line-soft align-top">
-                                        <td className="px-5 py-3">
-                                            <Pill tone={s.tone}>{s.label}</Pill>
-                                            {c.error && <div className="mt-1.5 text-xs text-dim">{c.error}</div>}
-                                        </td>
-                                        <td className="px-5 py-3 font-mono text-[13px] text-dim">{c.ip ?? '—'}</td>
-                                        <td className="px-5 py-3 text-dim">{timeAgo(c.created_at)}</td>
-                                        <td className="px-5 py-3 text-right">
-                                            {c.session_id && (
-                                                <Link to={`/remote?session=${c.session_id}`} className="text-[13px] text-amber-soft hover:underline">
-                                                    Open session
-                                                </Link>
-                                            )}
-                                        </td>
-                                    </tr>
-                                );
-                            })}
-                        </tbody>
-                    </table>
+            <section aria-labelledby={`calls-heading-${hook.id}`} className="border-t border-line">
+                <div className="flex items-center justify-between gap-3 px-4 py-3">
+                    <h3 id={`calls-heading-${hook.id}`} className="m-0 text-sm font-semibold">
+                        Recent calls
+                    </h3>
+                    <button
+                        type="button"
+                        onClick={onRefresh}
+                        className="cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 text-[13px] text-dim hover:bg-raised hover:text-ink"
+                    >
+                        Refresh
+                    </button>
                 </div>
-            )}
-        </section>
+                {calls.length === 0 ? (
+                    <p className="m-0 px-4 pb-4 text-[13px] text-dim">
+                        No calls yet. They show here with what each one started.
+                    </p>
+                ) : (
+                    <div className="relative overflow-x-auto">
+                        <table className="w-full min-w-[520px] border-collapse text-sm">
+                            <thead>
+                                <tr className="border-t border-line-soft text-left text-xs text-dim">
+                                    <th scope="col" className="px-4 py-2 font-medium">Result</th>
+                                    <th scope="col" className="px-4 py-2 font-medium">From</th>
+                                    <th scope="col" className="px-4 py-2 font-medium">When</th>
+                                    <th scope="col" className="px-4 py-2 font-medium">
+                                        <span className="sr-only">Session</span>
+                                    </th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {calls.map((c) => {
+                                    const st = CALL[c.status];
+
+                                    return (
+                                        <tr key={c.id} className="border-t border-line-soft align-top">
+                                            <td className="px-4 py-2.5">
+                                                <Pill tone={st.tone}>{st.label}</Pill>
+                                                {c.error && <div className="mt-1.5 text-xs text-dim">{c.error}</div>}
+                                            </td>
+                                            <td className="px-4 py-2.5 font-mono text-[13px] text-dim">{c.ip ?? '—'}</td>
+                                            <td className="px-4 py-2.5 text-dim">{timeAgo(c.created_at)}</td>
+                                            <td className="px-4 py-2.5 text-right">
+                                                {c.session_id && (
+                                                    <Link to={`/remote?session=${c.session_id}`} className="text-[13px] text-amber-soft hover:underline">
+                                                        Open session
+                                                    </Link>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </section>
+        </div>
     );
 }

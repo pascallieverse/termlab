@@ -59,6 +59,147 @@ const KEYS: { label: string; title: string; seq: string }[] = [
     { label: '⏎', title: 'Enter', seq: '\r' },
 ];
 
+/**
+ * Swipes scroll the terminal on touch screens.
+ *
+ * xterm's own touch scrolling only moves its scrollback: it does nothing while the app tracks
+ * the mouse (Claude Code's full-screen view) or is on the alternate screen (vim, less), and it
+ * blocks the box around it, which scrolls when the session is bigger than the view. So a swipe
+ * scrolls that box first, then goes to the terminal as mouse-wheel turns, which xterm sends to
+ * the app when it wants them (or as arrow keys on the alternate screen, as a wheel does).
+ */
+function swipeToScroll(box: HTMLElement, t: Terminal): () => void {
+    let lastX = 0;
+    let lastY = 0;
+    let axis: 'x' | 'y' | null = null;
+    let tracking = false;
+    /** Pixels swiped that are not yet a whole wheel turn for the app. */
+    let pending = 0;
+    let velocity = 0;
+    let lastTime = 0;
+    let fling = 0;
+
+    const rowHeight = () => {
+        const screen = box.querySelector<HTMLElement>('.xterm-screen');
+        return screen && t.rows ? screen.offsetHeight / t.rows : 16;
+    };
+
+    const wheel = (deltaY: number, deltaMode: number) => {
+        const target = box.querySelector<HTMLElement>('.xterm-screen');
+        if (!target) return;
+        const rect = target.getBoundingClientRect();
+        target.dispatchEvent(
+            new WheelEvent('wheel', {
+                deltaY,
+                deltaMode,
+                clientX: rect.left + Math.min(rect.width, box.clientWidth) / 2,
+                clientY: rect.top + Math.min(rect.height, box.clientHeight) / 2,
+                bubbles: true,
+                cancelable: true,
+            }),
+        );
+    };
+
+    /** Scrolls by `dy` pixels (positive: toward newer output). */
+    const scrollY = (dy: number) => {
+        const before = box.scrollTop;
+        box.scrollTop = before + dy;
+        const rest = dy - (box.scrollTop - before);
+        if (Math.abs(rest) < 0.5) return;
+        const app = t.modes.mouseTrackingMode !== 'none' || t.buffer.active.type === 'alternate';
+        if (!app) {
+            wheel(rest, WheelEvent.DOM_DELTA_PIXEL);
+            return;
+        }
+        // Apps scroll a few lines per wheel turn: one turn per few rows swiped keeps the
+        // text roughly under the finger (one per row when the turns become arrow keys).
+        const row = rowHeight();
+        const step = Math.max(12, t.modes.mouseTrackingMode !== 'none' ? row * 3 : row);
+        pending += rest;
+        while (Math.abs(pending) >= step) {
+            const dir = Math.sign(pending);
+            wheel(dir, WheelEvent.DOM_DELTA_LINE);
+            pending -= dir * step;
+        }
+    };
+
+    const stopFling = () => {
+        cancelAnimationFrame(fling);
+        fling = 0;
+    };
+
+    const onStart = (e: TouchEvent) => {
+        stopFling();
+        tracking = e.touches.length === 1;
+        if (!tracking) return;
+        lastX = e.touches[0].clientX;
+        lastY = e.touches[0].clientY;
+        lastTime = e.timeStamp;
+        axis = null;
+        pending = 0;
+        velocity = 0;
+    };
+
+    const onMove = (e: TouchEvent) => {
+        if (!tracking || e.touches.length !== 1) {
+            tracking = false;
+            return;
+        }
+        const x = e.touches[0].clientX;
+        const y = e.touches[0].clientY;
+        if (!axis) {
+            // A small wobble is still a tap.
+            if (Math.abs(x - lastX) < 6 && Math.abs(y - lastY) < 6) return;
+            axis = Math.abs(x - lastX) > Math.abs(y - lastY) ? 'x' : 'y';
+        }
+        // Ours, not xterm's (which would only move its scrollback) nor the page's.
+        e.stopPropagation();
+        if (e.cancelable) e.preventDefault();
+        if (axis === 'x') {
+            box.scrollLeft += lastX - x;
+        } else {
+            const dy = lastY - y;
+            const dt = Math.max(1, e.timeStamp - lastTime);
+            velocity = 0.8 * (dy / dt) + 0.2 * velocity;
+            scrollY(dy);
+        }
+        lastX = x;
+        lastY = y;
+        lastTime = e.timeStamp;
+    };
+
+    const onEnd = (e: TouchEvent) => {
+        if (!tracking) return;
+        tracking = false;
+        // A swipe that stopped before letting go doesn't fling.
+        if (axis !== 'y' || e.timeStamp - lastTime > 80 || Math.abs(velocity) < 0.2) return;
+        let v = velocity;
+        let prev = performance.now();
+        const step = (now: number) => {
+            const dt = Math.min(32, now - prev);
+            prev = now;
+            scrollY(v * dt);
+            v *= Math.pow(0.95, dt / 16);
+            fling = Math.abs(v) > 0.03 ? requestAnimationFrame(step) : 0;
+        };
+        fling = requestAnimationFrame(step);
+    };
+
+    // Capture: before xterm's own handlers on the terminal inside the box.
+    box.addEventListener('touchstart', onStart, { capture: true, passive: true });
+    box.addEventListener('touchmove', onMove, { capture: true, passive: false });
+    box.addEventListener('touchend', onEnd, { capture: true, passive: true });
+    box.addEventListener('touchcancel', onEnd, { capture: true, passive: true });
+
+    return () => {
+        stopFling();
+        box.removeEventListener('touchstart', onStart, { capture: true });
+        box.removeEventListener('touchmove', onMove, { capture: true });
+        box.removeEventListener('touchend', onEnd, { capture: true });
+        box.removeEventListener('touchcancel', onEnd, { capture: true });
+    };
+}
+
 function useCoarsePointer(): boolean {
     return useSyncExternalStore(
         (cb) => {
@@ -235,7 +376,10 @@ export function LiveTerminal({
             layout();
         });
 
+        const stopSwipe = swipeToScroll(b, t);
+
         return () => {
+            stopSwipe();
             observer.disconnect();
             b.removeEventListener('scroll', onScroll);
             t.dispose();
@@ -324,6 +468,12 @@ export function LiveTerminal({
                 live.input(sessionId, encode(data));
             }
         });
+        // Mouse reports in the old X10 format: one byte per character.
+        const bytes = term.current?.onBinary((data) => {
+            if (interactiveRef.current && streaming.current) {
+                live.input(sessionId, btoa(data));
+            }
+        });
 
         // Coming back to this page takes the size again (Termlab may have taken it back);
         // leaving it hands the size back.
@@ -336,6 +486,7 @@ export function LiveTerminal({
 
         return () => {
             keys?.dispose();
+            bytes?.dispose();
             document.removeEventListener('visibilitychange', onVisible);
             window.removeEventListener('focus', onFocus);
             b?.removeEventListener('pointerdown', onFocus);

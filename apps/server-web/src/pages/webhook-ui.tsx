@@ -1,6 +1,4 @@
 import { useEffect, useRef, type ReactNode } from 'react';
-import { Button } from '@/components/el/button';
-import { useToast } from '@/components/el/toast';
 import { cn } from '@/lib/utils';
 
 // Pieces both webhook tabs use.
@@ -35,57 +33,19 @@ export function Field({
     );
 }
 
-/** A secret shown on request (a signing secret, a hook's URL), with Copy. */
-export function SecretValue({
-    masked,
-    load,
-    busy,
-    what,
-    value,
-    onValue,
-}: {
-    masked: string;
-    load: () => void;
-    busy: boolean;
-    /** For the toasts: "Secret", "URL". */
-    what: string;
-    value: string | null;
-    onValue: (v: string | null) => void;
-}) {
-    const toast = useToast();
-
-    async function copy() {
-        if (!value) return;
-        try {
-            await navigator.clipboard.writeText(value);
-            toast.success(`${what} copied.`);
-        } catch {
-            toast.error(`Could not copy. Select the ${what.toLowerCase()} and copy it.`);
-        }
-    }
-
-    return (
-        <div className="flex flex-wrap gap-2">
-            <code className="min-w-0 flex-[1_1_220px] overflow-x-auto rounded-lg border border-line bg-bg p-3 font-mono text-[13px] [overflow-wrap:anywhere] text-ink-soft">
-                {value ?? masked}
-            </code>
-            <Button variant="outline" disabled={busy} onClick={() => (value ? onValue(null) : load())}>
-                {value ? 'Hide' : 'Reveal'}
-            </Button>
-            {value && (
-                <Button variant="outline" onClick={() => void copy()}>
-                    Copy
-                </Button>
-            )}
-        </div>
-    );
-}
-
-/** A form opened from further down (Edit) scrolls itself into view. */
+/**
+ * A form opened from further down (Edit) scrolls itself into view. Only the settings panel
+ * scrolls (scrollIntoView would move the dialog too), and only when the form is out of sight:
+ * one that opens at the top leaves the tabs above it in view.
+ */
 export function useScrollIntoView<T extends HTMLElement>() {
     const ref = useRef<T>(null);
     useEffect(() => {
-        ref.current?.scrollIntoView({ block: 'start' });
+        const el = ref.current;
+        const box = el?.closest<HTMLElement>('.settings-content');
+        if (!el || !box) return;
+        const top = el.getBoundingClientRect().top - box.getBoundingClientRect().top;
+        if (top < 0) box.scrollTop += top - 16;
     }, []);
 
     return ref;
