@@ -670,6 +670,11 @@ body.session-dragging, body.session-dragging * { cursor: grabbing !important; }
 .diff-toolbar { display: flex; align-items: center; gap: 12px; padding: 4px 0 12px; color: var(--muted); font-size: 13px; }
 .diff-file { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin-bottom: 14px; background: var(--terminal); }
 .diff-file-head { display: flex; gap: 12px; padding: 8px 12px; background: var(--card); border-bottom: 1px solid var(--border); font-size: 12px; }
+.diff-file-head.toggle { cursor: pointer; user-select: none; }
+.diff-file-head.toggle:hover { background: var(--row-hover); }
+.diff-file:has(.diff-file-head[aria-expanded="false"]) .diff-file-head { border-bottom: 0; }
+.diff-caret { color: var(--muted); width: 10px; }
+.diff-more { display: flex; align-items: center; gap: 12px; padding: 8px 12px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); background: var(--card); }
 .diff-path { flex: 1; color: var(--text-2); overflow-wrap: anywhere; }
 .diff-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; line-height: 1.55; }
 .diff-table td { padding: 0 8px; vertical-align: top; white-space: pre-wrap; overflow-wrap: anywhere; }

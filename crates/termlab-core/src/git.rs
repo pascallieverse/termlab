@@ -43,6 +43,39 @@ fn git(env: &UserEnv, dir: &Path, args: &[&str]) -> Option<(bool, String)> {
     ))
 }
 
+/// Like [`git_ok`], but reads at most `cap` bytes of output and stops git after that, so a
+/// huge diff (generated files, a vendored tree) never lands in memory whole.
+fn git_capped(env: &UserEnv, dir: &Path, args: &[&str], cap: usize) -> Option<String> {
+    use std::io::Read;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env_clear()
+        .envs(env.vars())
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut buf = Vec::new();
+    let read = child
+        .stdout
+        .take()
+        .map(|out| out.take(cap as u64).read_to_end(&mut buf));
+    let full = buf.len() >= cap;
+    if full {
+        let _ = child.kill();
+    }
+    let status = child.wait().ok()?;
+    if read.is_none_or(|r| r.is_err()) || (!full && !status.success()) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
 fn git_ok(env: &UserEnv, dir: &Path, args: &[&str]) -> Option<String> {
     match git(env, dir, args)? {
         (true, out) => Some(out),
@@ -130,7 +163,7 @@ fn bytecount_lines(b: &[u8]) -> u64 {
 
 /// Unified diff since `base`, including untracked files as new-file diffs.
 pub fn diff(env: &UserEnv, dir: &Path, base: &str) -> String {
-    let mut out = git_ok(
+    let mut out = git_capped(
         env,
         dir,
         &[
@@ -141,6 +174,7 @@ pub fn diff(env: &UserEnv, dir: &Path, base: &str) -> String {
             "-U3",
             base,
         ],
+        MAX_DIFF_BYTES + 1,
     )
     .unwrap_or_default();
     for path in untracked(env, dir) {
@@ -250,5 +284,43 @@ mod tests {
         let d = diff(&env, dir, &base);
         assert!(d.contains("+three"));
         assert!(d.contains("+++ b/new.txt"));
+    }
+
+    #[test]
+    fn huge_diff_is_capped() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path();
+        let env = UserEnv::from_vars([
+            ("PATH", "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"),
+            ("HOME", dir.to_str().unwrap()),
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ]);
+        run(dir, &["init", "-q", "-b", "main"]);
+        let line = "x".repeat(99) + "\n";
+        for i in 0..20 {
+            std::fs::write(dir.join(format!("f{i}.txt")), line.repeat(5_000)).unwrap();
+        }
+        run(dir, &["add", "."]);
+        run(
+            dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "init",
+            ],
+        );
+        let base = head_commit(&env, dir).unwrap();
+        // 20 files × 500 KB deleted: ~10 MB of diff.
+        for i in 0..20 {
+            std::fs::write(dir.join(format!("f{i}.txt")), "").unwrap();
+        }
+        let out = diff(&env, dir, &base);
+        assert!(out.len() < MAX_DIFF_BYTES + 100);
+        assert!(out.ends_with("… diff truncated\n"));
     }
 }
