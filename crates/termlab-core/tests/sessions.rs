@@ -42,9 +42,20 @@ fn spawn_fake(size: TermSize, cap: usize) -> PtyProcess {
 
 /// Reads output into `buf` until it contains `needle`.
 async fn wait_for(rx: &mut broadcast::Receiver<PtyEvent>, buf: &mut String, needle: &str) {
+    wait_for_nth(rx, buf, needle, 1).await;
+}
+
+/// Reads output into `buf` until it contains `needle` `n` times. For a session restarted in
+/// place, whose snapshot still has the earlier run's output.
+async fn wait_for_nth(
+    rx: &mut broadcast::Receiver<PtyEvent>,
+    buf: &mut String,
+    needle: &str,
+    n: usize,
+) {
     let found = timeout(WAIT, async {
         loop {
-            if buf.contains(needle) {
+            if buf.matches(needle).count() >= n {
                 return;
             }
             match rx.recv().await {
@@ -56,8 +67,8 @@ async fn wait_for(rx: &mut broadcast::Receiver<PtyEvent>, buf: &mut String, need
     })
     .await;
     assert!(
-        found.is_ok() && buf.contains(needle),
-        "timed out waiting for {needle:?}; got:\n{buf}"
+        found.is_ok() && buf.matches(needle).count() >= n,
+        "timed out waiting for {needle:?} (×{n}); got:\n{buf}"
     );
 }
 
@@ -951,12 +962,13 @@ async fn loads_sessions_from_everywhere_imports_and_attaches() {
     wait_for_exit_status(&tl, attached.record.id, SessionStatus::Done).await;
 
     // Resuming an attached session re-attaches (the agent kept it running) rather than
-    // starting a second copy of the conversation.
+    // starting a second copy of the conversation. The agent may print before we subscribe,
+    // so start from the snapshot, which also still has the first run's line.
     tl.restart(attached.record.id, None).unwrap();
     let att = tl.attach(attached.record.id).unwrap();
     let mut rx = att.events;
-    let mut buf = String::new();
-    wait_for(&mut rx, &mut buf, "ARGS: attach bg1").await;
+    let mut buf = String::from_utf8_lossy(&att.snapshot).into_owned();
+    wait_for_nth(&mut rx, &mut buf, "ARGS: attach bg1", 2).await;
 
     // Restarting it onto a new version is the agent's job (it runs the session): Termlab
     // asks it to, and only for sessions it is attached to.
@@ -979,7 +991,7 @@ async fn loads_sessions_from_everywhere_imports_and_attaches() {
     );
     let att = tl.attach(attached.record.id).unwrap();
     let mut rx = att.events;
-    let mut buf = String::new();
+    let mut buf = String::from_utf8_lossy(&att.snapshot).into_owned();
     wait_for(&mut rx, &mut buf, "ARGS: resume bg-1").await;
     tl.stop(attached.record.id).unwrap();
     wait_for_exit_status(&tl, attached.record.id, SessionStatus::Done).await;
