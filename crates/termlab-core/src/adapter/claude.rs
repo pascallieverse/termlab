@@ -571,16 +571,28 @@ pub fn claude_subagents(transcript: &Path, now: Millis) -> Vec<SubAgent> {
                 .map(String::from)
         };
         let last_activity_at = mtime_ms(&path);
-        // Its last line being a finished assistant turn means it has reported back.
-        let finished = last_json_line(&path).is_some_and(|v| {
-            v.get("type").and_then(Value::as_str) == Some("assistant")
-                && matches!(
+        // Claude marks a stopped agent `"finished": true` in its meta file. Without that,
+        // its last line tells: a finished assistant turn, or the result of the tool that
+        // background agents report back with ("Report delivered to your caller."), or the
+        // user interrupting it.
+        let finished = meta.get("finished").and_then(Value::as_bool) == Some(true)
+            || last_json_line(&path).is_some_and(|v| match v.get("type").and_then(Value::as_str) {
+                Some("assistant") => matches!(
                     v.get("message")
                         .and_then(|m| m.get("stop_reason"))
                         .and_then(Value::as_str),
                     Some("end_turn" | "stop_sequence" | "max_tokens" | "refusal")
-                )
-        });
+                ),
+                Some("user") => v
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .map(Value::to_string)
+                    .is_some_and(|c| {
+                        c.contains("Report delivered to your caller")
+                            || c.contains("[Request interrupted by user")
+                    }),
+                _ => false,
+            });
         out.push(SubAgent {
             id: id.to_string(),
             name: text("name")
@@ -1187,13 +1199,27 @@ mod tests {
             format!("{user}\n{tool}\n{done}\n"),
         )
         .unwrap();
+        // A background agent that reported back: its last line is that tool's result.
+        let reported = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"{\"success\":true,\"message\":\"Report delivered to your caller.\"}"}]}]}}"#;
+        std::fs::write(
+            sub.join("agent-areport-3.jsonl"),
+            format!("{user}\n{tool}\n{reported}\n"),
+        )
+        .unwrap();
+        // Marked finished in its meta file, whatever its last line.
+        std::fs::write(sub.join("agent-astop-4.jsonl"), format!("{user}\n{tool}\n")).unwrap();
+        std::fs::write(
+            sub.join("agent-astop-4.meta.json"),
+            r#"{"agentType":"coder","finished":true}"#,
+        )
+        .unwrap();
         // Not a transcript.
         std::fs::write(sub.join("notes.txt"), "x").unwrap();
 
         let now = mtime_ms(&sub.join("agent-abuild-1.jsonl")) + 1_000;
         let mut got = claude_subagents(&transcript, now);
         got.sort_by(|a, b| a.id.cmp(&b.id));
-        assert_eq!(got.len(), 2);
+        assert_eq!(got.len(), 4);
         assert_eq!(got[0].id, "abuild-1");
         assert_eq!(got[0].name, "cp-build");
         assert_eq!(
@@ -1209,6 +1235,10 @@ mod tests {
         assert_eq!(got[1].id, "aold-2");
         assert_eq!(got[1].name, "agent");
         assert!(!got[1].running);
+        assert_eq!(got[2].id, "areport-3");
+        assert!(!got[2].running);
+        assert_eq!(got[3].id, "astop-4");
+        assert!(!got[3].running);
 
         // Quiet for a long time without finishing: no longer counted as working.
         let later = claude_subagents(&transcript, now + SUBAGENT_QUIET_MS + 60_000);
