@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/termlab-core", "crates/termlab-hook", "crates/termlabd", "crates/termlab-screen", "crates/termlab-server", "apps/desktop/src-tauri"]
 
 [workspace.package]
-version = "0.2.14"
+version = "0.2.15"
 edition = "2024"
 license = "FSL-1.1-ALv2"
 rust-version = "1.93"
