@@ -1448,3 +1448,137 @@ async fn claude_status_line_reports_plan_limits() {
     assert_eq!(again[0].windows.len(), 2);
     tl.shutdown();
 }
+
+/// An agent installed with npm that knows a newer version is out, like Codex.
+#[cfg(unix)]
+struct NpmAdapter {
+    program: PathBuf,
+}
+
+#[cfg(unix)]
+impl AgentAdapter for NpmAdapter {
+    fn id(&self) -> AgentId {
+        AgentId::Claude
+    }
+    fn binary_name(&self) -> &'static str {
+        "sh"
+    }
+    fn api_key_vars(&self) -> &'static [&'static str] {
+        &[]
+    }
+    fn detect(&self, env: &UserEnv) -> Option<Installed> {
+        Some(Installed {
+            path: self.program.clone(),
+            ..FakeAdapter.detect(env)?
+        })
+    }
+    fn latest_version(&self, _env: &UserEnv) -> Option<String> {
+        Some("2.0.0".into())
+    }
+    fn can_resume(&self) -> bool {
+        true
+    }
+    fn launch(&self, req: &LaunchRequest) -> CommandSpec {
+        FakeAdapter.launch(req)
+    }
+    fn resume(&self, id: &str, req: &LaunchRequest) -> Option<CommandSpec> {
+        FakeAdapter.resume(id, req)
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_npm_agent_with_a_newer_release_is_updated_in_its_own_prefix() {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = |path: &Path, text: &str| {
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    let data = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(root.path()).unwrap();
+
+    // `<prefix>/bin/agent` -> `../lib/node_modules/fake-agent/bin/agent`, version 1.0.0.
+    let prefix = root.join("prefix");
+    let package = prefix.join("lib/node_modules/fake-agent");
+    std::fs::create_dir_all(package.join("bin")).unwrap();
+    std::fs::create_dir_all(prefix.join("bin")).unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"name":"fake-agent","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    executable(
+        &package.join("bin/agent"),
+        "#!/bin/sh\nexec /bin/sh \"$@\"\n",
+    );
+    let program = prefix.join("bin/agent");
+    std::os::unix::fs::symlink("../lib/node_modules/fake-agent/bin/agent", &program).unwrap();
+
+    // A stand-in npm on PATH: notes its arguments, then installs 2.0.0 at `--prefix`.
+    let tools = root.join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let log = root.join("npm.log");
+    executable(
+        &tools.join("npm"),
+        &format!(
+            "#!/bin/sh\necho \"$@\" > '{log}'\nwhile [ \"$1\" != --prefix ]; do shift; done\n\
+             p=\"$2/lib/node_modules/fake-agent\"\n\
+             printf '{{\"name\":\"fake-agent\",\"version\":\"2.0.0\"}}' > \"$p/package.json\"\n\
+             sleep 1; printf '#!/bin/sh\\nexec /bin/sh \"$@\"\\n' > \"$p/bin/agent\"\n",
+            log = log.display()
+        ),
+    );
+
+    let env = UserEnv::from_vars([
+        (
+            "PATH",
+            format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", tools.display()),
+        ),
+        ("HOME", "/tmp".into()),
+    ]);
+    let mut config = TermlabConfig::new(DataDirs::new(data.path()), env);
+    config.adapters = vec![Box::new(NpmAdapter {
+        program: program.clone(),
+    })];
+    config.update_check_ms = 50;
+    let tl = Termlab::open(config).unwrap();
+    tl.start_background().unwrap();
+
+    let folder = tl.add_folder(project.path()).unwrap();
+    let id = tl
+        .start_session(&start_req(folder.id, None), None)
+        .unwrap()
+        .record
+        .id;
+    wait_for_status(&tl, id, SessionStatus::Idle).await;
+    wait_until("the newer release to be offered", || {
+        tl.session(id).unwrap().update_available.as_deref() == Some("2.0.0")
+    })
+    .await;
+    assert!(!tl.session(id).unwrap().update_ready);
+
+    let tl2 = Arc::clone(&tl);
+    let installed = tokio::task::spawn_blocking(move || tl2.update_agent(id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(installed.as_deref(), Some("2.0.0"));
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap().trim(),
+        format!(
+            "install --global --prefix {} fake-agent@latest",
+            prefix.display()
+        ),
+        "npm updates the copy the session runs, not whichever one npm's own prefix holds"
+    );
+    // Now the session runs an older copy than the installed one: restart to update.
+    wait_until("the update to be noticed", || {
+        let s = tl.session(id).unwrap();
+        s.update_ready && s.update_available.is_none()
+    })
+    .await;
+    tl.stop(id).unwrap();
+    wait_for_exit_status(&tl, id, SessionStatus::Done).await;
+}

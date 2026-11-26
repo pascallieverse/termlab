@@ -32,7 +32,7 @@ use crate::pty::{Attachment, ExitInfo, PtyProcess, SpawnSpec};
 use crate::scrollback::{self, DEFAULT_SCROLLBACK_BYTES, Scrollback};
 use crate::status::{self, answer_keys, heuristic_status, parse_prompt};
 use crate::transcript::{self, Progress, TimelineEntry, TimelineKind};
-use crate::update::ProgramWatch;
+use crate::update::{Install, ProgramWatch, is_newer};
 
 const MONITOR_INTERVAL: Duration = Duration::from_millis(500);
 const USAGE_INTERVAL_MS: Millis = 5_000;
@@ -265,6 +265,9 @@ struct LiveMeta {
     watch: Option<ProgramWatch>,
     update_checked_at: Millis,
     update_ready: bool,
+    /// A newer version the agent knows of than the copy this session runs, which Termlab
+    /// can install (npm, Homebrew).
+    update_available: Option<String>,
 }
 
 pub struct Termlab {
@@ -274,6 +277,8 @@ pub struct Termlab {
     stop_requested: Mutex<HashSet<SessionId>>,
     /// Running sessions to forget once they exit ("Remove" on a live session).
     remove_on_exit: Mutex<HashSet<SessionId>>,
+    /// Held while a package manager updates an agent: one at a time.
+    updating: Mutex<()>,
     /// Set by `shutdown`: sessions killed from then on keep the record shutdown wrote.
     shutting_down: std::sync::atomic::AtomicBool,
     installed: RwLock<Option<HashMap<AgentId, Installed>>>,
@@ -310,6 +315,7 @@ impl Termlab {
             meta: Mutex::new(HashMap::new()),
             stop_requested: Mutex::new(HashSet::new()),
             remove_on_exit: Mutex::new(HashSet::new()),
+            updating: Mutex::new(()),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             installed: RwLock::new(None),
             plan_usage: Mutex::new(load_plan_usage(&config.dirs.plan_usage_path())),
@@ -722,6 +728,9 @@ impl Termlab {
                 .map(|m| m.subagents.clone())
                 .unwrap_or_default(),
             update_ready: live && m.is_some_and(|m| m.update_ready),
+            update_available: m
+                .filter(|m| live && !m.update_ready)
+                .and_then(|m| m.update_available.clone()),
             live,
             preview: m.map(|m| m.preview.clone()).unwrap_or_default(),
             approval: m.and_then(|m| m.approval.clone()),
@@ -1161,6 +1170,59 @@ impl Termlab {
         self.live(id)?.resize(size)?;
         // Remembered so the saved output replays at the size it was drawn at.
         self.db().set_term_size(id, size)
+    }
+
+    /// Updates the copy of the agent a running session uses, with the package manager that
+    /// installed it (npm at that copy's own prefix, or Homebrew), so restarting the session
+    /// runs the new version. Answers the version now installed.
+    pub fn update_agent(&self, id: SessionId) -> Result<Option<String>> {
+        let rec = self.record(id)?;
+        self.live(id)?;
+        let program = self
+            .meta
+            .lock()
+            .expect("meta lock")
+            .get(&id)
+            .and_then(|m| m.watch.as_ref())
+            .map(|w| w.program().to_path_buf())
+            .ok_or(CoreError::SessionNotLive(id))?;
+        let name = rec.agent.display_name();
+        let unknown = || {
+            CoreError::Update(format!(
+                "Termlab can't tell how {name} at {} was installed, so it can't update it. \
+                 Update it yourself; the session then offers to restart.",
+                program.display()
+            ))
+        };
+        Install::find(&program).ok_or_else(unknown)?;
+        let latest = self.adapter(rec.agent)?.latest_version(&self.config.env);
+        {
+            let _one_at_a_time = self.updating.lock().expect("update lock");
+            // Looked at again under the lock: another session may have just updated it.
+            let install = Install::find(&program).ok_or_else(unknown)?;
+            let needed = match (latest.as_deref(), install.version()) {
+                (Some(latest), Some(installed)) => is_newer(latest, installed),
+                _ => true,
+            };
+            if needed {
+                install
+                    .update(&self.config.env)
+                    .map_err(CoreError::Update)?;
+            }
+        }
+        let installed = Install::find(&program).and_then(|i| i.version().map(String::from));
+        {
+            // Every session looks again soon: those still on the old copy now need a restart.
+            let mut meta = self.meta.lock().expect("meta lock");
+            for m in meta.values_mut() {
+                m.update_checked_at = 0;
+                if m.watch.as_ref().is_some_and(|w| w.program() == program) {
+                    m.update_available = None;
+                }
+            }
+        }
+        self.emit_session(id);
+        Ok(installed)
     }
 
     /// Asks the agent to stop (SIGHUP, as when a terminal window closes).
@@ -2029,7 +2091,13 @@ impl Termlab {
                 .and_then(|m| m.watch.clone()),
             )
         };
-        let outdated = update_watch.map(|w| w.outdated());
+        let update_check = update_watch.map(|w| {
+            let available = adapter.latest_version(&self.config.env).and_then(|latest| {
+                let installed = Install::find(w.program())?;
+                is_newer(&latest, installed.version()?).then_some(latest)
+            });
+            (w.outdated(), available)
+        });
         let folder = self.db().folder(rec.folder_id).ok();
         // Agents that pick their own session id (Codex, Vibe): find it on disk, so the
         // session can be resumed.
@@ -2097,10 +2165,14 @@ impl Termlab {
             if need_id {
                 m.id_checked_at = now;
             }
-            if let Some(outdated) = outdated {
+            if let Some((outdated, available)) = update_check {
                 m.update_checked_at = now;
                 if outdated {
                     m.update_ready = true;
+                    changed = true;
+                }
+                if m.update_available != available {
+                    m.update_available = available;
                     changed = true;
                 }
             }

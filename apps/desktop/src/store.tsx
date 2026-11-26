@@ -165,7 +165,8 @@ interface Store {
   moveFolder(id: number, before: number | null): Promise<void>;
   restarting: Set<string>;
   terminalEpochs: Record<string, number>;
-  restartSession(id: string): Promise<void>;
+  /** With `update`, first installs the newer release the session offers (`updateAvailable`). */
+  restartSession(id: string, update?: boolean): Promise<void>;
   addFolder(path: string): Promise<Folder | undefined>;
   refreshAgents(): Promise<void>;
   folderOf(s: Session): Folder | undefined;
@@ -584,7 +585,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
     restarting,
     terminalEpochs,
-    async restartSession(id) {
+    async restartSession(id, update) {
       if (restartPending.current.has(id)) return;
       restartPending.current.add(id);
       setRestarting(new Set(restartPending.current));
@@ -592,6 +593,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         await run(async () => {
           const session = sessions.find((s) => s.id === id);
           const canResume = agents?.find((a) => a.agent === session?.agent)?.canResume ?? false;
+          // The update runs before the session stops: if it fails, the session keeps going.
+          const installed = update ? await api.updateAgent(id) : null;
           const resumed = await restartSession(id, api, canResume);
           setSessions((list) => sortSessions([resumed, ...list.filter((s) => s.id !== id)]));
           // Force a fresh attachment even if React batches the stopped/running events.
@@ -599,7 +602,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           updatePanes(groupOf(resumed), (p) => activate(p, id));
           setView("focus");
           setTabFor(id, "terminal");
-          toast("Session restarted", "info");
+          toast(installed ? `Updated to ${installed}; session restarted` : "Session restarted", "info");
         });
       } finally {
         restartPending.current.delete(id);

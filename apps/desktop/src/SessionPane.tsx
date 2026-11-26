@@ -67,7 +67,9 @@ export function SessionPane({ session: s, active = true, multi = false }: { sess
         <div className="spacer" />
         {active && (
           <>
-            {s.live && s.updateReady && !!s.agentSessionId && canResume && <UpdateButton session={s} />}
+            {s.live && (s.updateReady || !!s.updateAvailable || store.restarting.has(s.id)) && !!s.agentSessionId && canResume && (
+              <UpdateButton session={s} />
+            )}
             <Tabs current={tab} onChange={(t) => store.setTabFor(s.id, t)} />
             <InspectorButton tab="notes" label="project notes" icon="note" />
             <InspectorButton tab="session" label="session details" icon="panel" />
@@ -144,25 +146,29 @@ function InspectorButton({ tab, label, icon }: { tab: InspectorTab; label: strin
 }
 
 /**
- * A newer version of the agent was installed while this session kept running the older one.
- * Restarting the session (on the same conversation) is what puts it on the new version.
+ * A newer version of the agent was installed while this session kept running the older one,
+ * or (for agents that don't update themselves, like Codex) a newer release is out. Restarting
+ * the session (on the same conversation) is what puts it on the new version; in the second
+ * case Termlab first installs it into the copy this session runs.
  */
 function UpdateButton({ session: s }: { session: Session }) {
   const store = useStore();
   const name = AGENTS[s.agent].name;
   const restarting = store.restarting.has(s.id);
   const busy = s.status === "running" || s.status === "needs_you";
+  const install = !s.updateReady && !!s.updateAvailable;
+  const go = () => void store.restartSession(s.id, install);
 
   function restart() {
-    if (!busy) return void store.restartSession(s.id);
+    if (!busy) return go();
     store.confirm({
-      title: `Restart ${name} now?`,
+      title: install ? `Update ${name} now?` : `Restart ${name} now?`,
       body:
         s.status === "running"
           ? `${name} is working. Restarting interrupts that; the conversation continues on the new version.`
           : `${name} is waiting for your answer. Restarting drops that question; the conversation continues on the new version.`,
-      action: "Restart",
-      onConfirm: () => void store.restartSession(s.id),
+      action: install ? "Update and restart" : "Restart",
+      onConfirm: go,
     });
   }
 
@@ -170,10 +176,14 @@ function UpdateButton({ session: s }: { session: Session }) {
     <button
       className="btn small amber-outline update-btn"
       disabled={restarting}
-      title={`A newer ${name} is installed; this session still runs the older one. Restarting continues the same conversation on the new version.`}
+      title={
+        install
+          ? `${name} ${s.updateAvailable} is out. Termlab installs it into the copy this session runs, then restarts the session on the same conversation.`
+          : `A newer ${name} is installed; this session still runs the older one. Restarting continues the same conversation on the new version.`
+      }
       onClick={restart}
     >
-      <Icon name="refresh" /> {restarting ? "Restarting…" : "Restart to update"}
+      <Icon name="refresh" /> {restarting ? (install ? "Updating…" : "Restarting…") : install ? `Update to ${s.updateAvailable}` : "Restart to update"}
     </button>
   );
 }

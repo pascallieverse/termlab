@@ -99,6 +99,13 @@ export function sessionMenu(store: Store, s: Session): MenuItem[] {
           : "Stops the current process and resumes this conversation; interrupts any work in progress",
       onSelect: () => void store.restartSession(s.id),
     });
+    if (!s.updateReady && s.updateAvailable)
+      items.push({
+        label: restarting ? "Updating…" : `Update ${name} to ${s.updateAvailable}`,
+        disabled: restarting || !canRestart,
+        hint: `Installs ${name} ${s.updateAvailable} into the copy this session runs, then restarts it on this conversation`,
+        onSelect: () => void store.restartSession(s.id, true),
+      });
     items.push({ label: "Stop session", danger: true, disabled: store.restarting.has(s.id), onSelect: () => void store.run(() => api.stop(s.id)) });
   }
   items.push({

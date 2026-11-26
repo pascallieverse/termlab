@@ -224,6 +224,12 @@ pub trait AgentAdapter: Send + Sync {
         })
     }
 
+    /// The newest version the agent itself found online, for agents that check but don't
+    /// update themselves. Termlab offers to update a session's copy when it is older.
+    fn latest_version(&self, _env: &UserEnv) -> Option<String> {
+        None
+    }
+
     /// Billing of the agent's own login (subscription vs API key), when it can tell us.
     fn login_billing(&self, _path: &Path, _env: &UserEnv) -> Billing {
         Billing::Unknown

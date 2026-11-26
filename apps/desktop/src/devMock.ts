@@ -105,7 +105,7 @@ const sessions: Session[] = [
   }),
   session({
     id: "s6", folderId: 3, agent: "codex", title: "Split prod and staging Terraform state", status: "idle",
-    updateReady: true,
+    updateAvailable: "0.172.0",
     lastActivityAt: now - 60 * min, preview: ["• Proposal: 3 steps using terraform state mv", "Waiting for your next message."],
     contextPercent: 22,
   }),
@@ -255,6 +255,17 @@ export function install() {
           return { ...session };
         }
         case "respawn": return null;
+        case "updateAgent": {
+          const session = sessions.find((s) => s.id === id);
+          if (!session) throw "Session not found";
+          const installed = session.updateAvailable ?? null;
+          return new Promise((resolve) =>
+            setTimeout(() => {
+              session.updateAvailable = null;
+              resolve(installed);
+            }, 1200),
+          );
+        }
         case "stop":
         case "restart": {
           const session = sessions.find((s) => s.id === id);

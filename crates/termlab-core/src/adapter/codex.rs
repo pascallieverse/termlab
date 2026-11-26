@@ -543,6 +543,14 @@ impl AgentAdapter for CodexAdapter {
         }
     }
 
+    /// Codex checks for a new release itself and notes it in `~/.codex/version.json`
+    /// (`{"latest_version": "0.172.0", …}`); it only prints how to update, it doesn't.
+    fn latest_version(&self, env: &UserEnv) -> Option<String> {
+        let text = std::fs::read_to_string(codex_home(env)?.join("version.json")).ok()?;
+        let v: Value = serde_json::from_str(&text).ok()?;
+        v.get("latest_version")?.as_str().map(String::from)
+    }
+
     /// Listed models from Codex's own cache (`~/.codex/models_cache.json`).
     fn model_suggestions(&self, env: &UserEnv) -> Vec<String> {
         let Some(path) = codex_home(env).map(|h| h.join("models_cache.json")) else {

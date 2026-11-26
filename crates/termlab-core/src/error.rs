@@ -33,6 +33,9 @@ pub enum CoreError {
 
     #[error("invalid input: {0}")]
     InvalidInput(String),
+
+    #[error("{0}")]
+    Update(String),
 }
 
 pub type Result<T, E = CoreError> = std::result::Result<T, E>;

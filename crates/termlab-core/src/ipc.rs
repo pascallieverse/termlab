@@ -139,6 +139,10 @@ pub enum Request {
     Respawn {
         id: SessionId,
     },
+    /// Update the copy of the agent a session runs (npm, Homebrew).
+    UpdateAgent {
+        id: SessionId,
+    },
     #[serde(rename_all = "camelCase")]
     StopIdle {
         folder_id: FolderId,
@@ -528,6 +532,7 @@ pub fn dispatch(tl: &Arc<Termlab>, req: Request) -> Result<Value, String> {
         Resize { id, cols, rows } => to_value(tl.resize(id, TermSize { cols, rows })),
         Stop { id } => to_value(tl.stop(id)),
         Respawn { id } => to_value(tl.respawn(id)),
+        UpdateAgent { id } => to_value(tl.update_agent(id)),
         StopIdle { folder_id } => to_value(tl.stop_idle(folder_id)),
         Delete { id } => to_value(tl.delete_session(id)),
         SetTitle { id, title } => to_value(tl.set_title(id, &title)),

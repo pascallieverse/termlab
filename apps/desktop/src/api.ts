@@ -123,6 +123,8 @@ export interface Session {
   subagents?: SubAgent[];
   /** A different version of the agent was installed after this session started; restarting runs it. */
   updateReady?: boolean;
+  /** A newer release than the copy this session runs, which Termlab can install (npm, Homebrew). */
+  updateAvailable?: string | null;
 }
 
 export interface Installed {
@@ -329,6 +331,8 @@ export const api = {
   restart: (id: string, size?: TermSize) => call<Session>("restart", { id, size: size ?? null }),
   /** Asks the agent to restart a background session it runs itself (one Termlab is attached to). */
   respawn: (id: string) => call<null>("respawn", { id }),
+  /** Updates the copy of the agent this session runs; answers the version now installed. */
+  updateAgent: (id: string) => call<string | null>("updateAgent", { id }),
   fork: (id: string) => call<Session>("fork", { id, size: null }),
   handoffMessage: (id: string) => call<string>("handoffMessage", { id }),
   handOff: (id: string, agent: AgentId, permission: PermissionPreset, model: string | null) =>

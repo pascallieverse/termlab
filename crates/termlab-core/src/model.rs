@@ -357,6 +357,10 @@ pub struct SessionView {
     /// restarting the session runs it.
     #[serde(default)]
     pub update_ready: bool,
+    /// A newer version of the agent than this session's copy, which Termlab can install
+    /// (`Termlab::update_agent`); restarting afterwards runs it.
+    #[serde(default)]
+    pub update_available: Option<String>,
 }
 
 /// Terminal size in character cells.
