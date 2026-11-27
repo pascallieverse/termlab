@@ -113,6 +113,7 @@ export function SessionPane({ session: s, active = true, multi = false }: { sess
               sessionId={s.id}
               agent={s.agent}
               live={s.live}
+              transcriptPath={s.transcriptPath}
               autoFocus={active}
             />
           ))}

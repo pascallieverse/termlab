@@ -70,6 +70,7 @@ pub fn run() {
             commands::open_in_terminal,
             commands::youtube_live_video,
             commands::open_external,
+            commands::open_transcript_link,
             commands::system_volume,
             commands::set_system_volume,
             updates::update_check,

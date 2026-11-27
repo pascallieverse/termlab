@@ -412,8 +412,11 @@ export const api = {
   /** The computer's output volume, 0 to 100; null where it can't be read. */
   systemVolume: () => invoke<number | null>("system_volume"),
   setSystemVolume: (volume: number) => invoke<null>("set_system_volume", { volume }),
-  /** Opens an https link in the user's browser. */
+  /** Opens a web link in the user's browser, or a local file:// one. */
   openExternal: (url: string) => invoke<null>("open_external", { url }),
+  /** Opens the target of the agent's newest Markdown link with this label; false if none. */
+  openTranscriptLink: (transcript: string, label: string) =>
+    invoke<boolean>("open_transcript_link", { transcript, label }),
   remoteStatus: () => call<RemoteStatus>("remoteStatus"),
   remotePair: (serverUrl: string, code: string, machineName: string) =>
     call<RemoteStatus>("remotePair", { request: { serverUrl, code, machineName } }),

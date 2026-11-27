@@ -182,17 +182,208 @@ pub async fn set_system_volume(volume: f64) -> CmdResult<()> {
     Ok(())
 }
 
-/// Opens a web link in the user's default browser. Only plain http(s) links: the terminal
-/// opens links agents print, and dev servers print http://localhost ones.
+/// Opens a link an agent printed: http(s) in the default browser (dev servers print
+/// http://localhost ones), a `file://` one as [`open_local_file`] does.
 #[tauri::command]
 pub fn open_external(url: String) -> CmdResult<()> {
+    if let Some(path) = url.strip_prefix("file://") {
+        return open_local_file(&percent_decode(path));
+    }
     let ok = (url.starts_with("https://") || url.starts_with("http://"))
         && url.len() < 2048
         && !url.chars().any(|c| c.is_control() || c.is_whitespace());
     if !ok {
-        return Err("only http and https links can be opened".into());
+        return Err("only web links and local files can be opened".into());
     }
     open_url(&url).map_err(|e| format!("couldn't open the link: {e}"))
+}
+
+/// Opens the target of a Markdown link (`[label](target)`) the agent wrote, found by its label
+/// in the session's transcript. Codex prints such links as underlined text with no target
+/// (it only sends OSC 8 hyperlinks for web links), so the screen alone can't open them.
+/// The newest link with that label wins. `false` when the transcript has no such link.
+#[tauri::command]
+pub fn open_transcript_link(transcript: String, label: String) -> CmdResult<bool> {
+    let label = label.trim();
+    if label.is_empty() || label.len() > 500 || !transcript.ends_with(".jsonl") {
+        return Ok(false);
+    }
+    let Some(target) = transcript_link_target(&PathBuf::from(transcript), label) else {
+        return Ok(false);
+    };
+    if target.starts_with("http://")
+        || target.starts_with("https://")
+        || target.starts_with("file://")
+    {
+        return open_external(target).map(|_| true);
+    }
+    open_local_file(&target).map(|_| true)
+}
+
+/// The target of the newest `[label](target)` in the transcript's last few megabytes.
+fn transcript_link_target(path: &std::path::Path, label: &str) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 16 * 1024 * 1024;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    // The transcript is JSON lines, so the link sits there JSON-escaped.
+    let escaped = serde_json::to_string(label).ok()?;
+    let needle = format!("[{}](", &escaped[1..escaped.len() - 1]);
+    let start = text.rfind(&needle)? + needle.len();
+    let rest = &text[start..];
+    let raw = if let Some(inner) = rest.strip_prefix('<') {
+        &inner[..inner.find('>')?]
+    } else {
+        // A title (`[a](url "title")`) or the end of the JSON string ends it too.
+        &rest[..rest.find([')', ' ', '"'])?]
+    };
+    let target: String = serde_json::from_str(&format!("\"{raw}\"")).ok()?;
+    (!target.is_empty() && target.len() < 4096 && !target.chars().any(char::is_control))
+        .then_some(target)
+}
+
+/// File types that open in their default app; any other file is only shown in the file
+/// manager, so a link can never run a program or script.
+const VIEWABLE: &[&str] = &[
+    "html", "htm", "md", "markdown", "txt", "log", "pdf", "png", "jpg", "jpeg", "gif", "webp",
+    "svg", "csv", "tsv", "json", "jsonl", "xml", "yaml", "yml", "diff", "patch",
+];
+
+/// Opens a local file the agent linked to: a document in its default app, a folder in the
+/// file manager, anything else revealed there. Paths may carry an editor-style
+/// `:line[:col]` or `#L…` suffix, which is dropped when the file isn't found with it.
+fn open_local_file(target: &str) -> CmdResult<()> {
+    let expanded = match target.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join(rest))
+            .ok_or("no home folder")?,
+        None => PathBuf::from(target),
+    };
+    if !expanded.is_absolute() {
+        return Err("only absolute file paths can be opened".into());
+    }
+    let path = [expanded.clone(), strip_location(&expanded)]
+        .into_iter()
+        .find(|p| p.exists())
+        .ok_or_else(|| format!("{} doesn't exist", expanded.display()))?;
+    let viewable = path.is_file()
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| VIEWABLE.contains(&e.to_ascii_lowercase().as_str()));
+    let result = if viewable || path.is_dir() {
+        open_url(&path.to_string_lossy())
+    } else {
+        reveal_file(&path)
+    };
+    result.map_err(|e| format!("couldn't open the file: {e}"))
+}
+
+/// `/a/b.rs:12:3` → `/a/b.rs`, `/a/b.md#L4` → `/a/b.md`.
+fn strip_location(path: &std::path::Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    let s = s.split_once("#L").map_or(&*s, |(p, _)| p);
+    let mut s = s;
+    for _ in 0..2 {
+        if let Some((head, tail)) = s.rsplit_once(':')
+            && !tail.is_empty()
+            && tail.bytes().all(|b| b.is_ascii_digit())
+        {
+            s = head;
+        }
+    }
+    PathBuf::from(s)
+}
+
+/// Shows a file selected in Finder / Explorer (on Linux, opens its folder).
+fn reveal_file(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut cmd = std::process::Command::new("/usr/bin/open");
+        cmd.arg("-R").arg(path);
+        cmd
+    };
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut cmd = std::process::Command::new("explorer.exe");
+        cmd.arg(format!("/select,{}", path.display()));
+        cmd
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(path.parent().unwrap_or(path));
+        cmd
+    };
+    cmd.spawn().map(|_| ())
+}
+
+/// Decodes `%XX` escapes in a `file://` URL's path.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn finds_newest_link_target_by_label() {
+        let dir = std::env::temp_dir().join(format!("termlab-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("rollout.jsonl");
+        std::fs::write(
+            &f,
+            concat!(
+                r#"{"text":"see [Open the \"report\"](/old/r.html)"}"#,
+                "\n",
+                r#"{"text":"see [Open the \"report\"](/Volumes/S/r.html) and [x](<a b.md>)"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            transcript_link_target(&f, "Open the \"report\"").as_deref(),
+            Some("/Volumes/S/r.html")
+        );
+        assert_eq!(transcript_link_target(&f, "x").as_deref(), Some("a b.md"));
+        assert_eq!(transcript_link_target(&f, "missing"), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn strips_editor_locations_and_decodes() {
+        assert_eq!(
+            strip_location("/a/b.rs:12:3".as_ref()),
+            PathBuf::from("/a/b.rs")
+        );
+        assert_eq!(
+            strip_location("/a/b.md#L4".as_ref()),
+            PathBuf::from("/a/b.md")
+        );
+        assert_eq!(strip_location("/a/b.md".as_ref()), PathBuf::from("/a/b.md"));
+        assert_eq!(percent_decode("/a%20b/c%2"), "/a b/c%2");
+    }
 }
 
 /// Hands a link to the system's default browser. No shell is involved, so nothing in the

@@ -10,6 +10,7 @@ import { claudeNewlineHandler } from "./terminalKeys";
 import { PREFS_EVENT, getPrefs } from "./prefs";
 import { onFileDrop, quotePaths } from "./fileDrop";
 import { arrowKeys, sgrWheelReports, wheelSteps } from "./terminalWheel";
+import { underlinedLinkProvider } from "./underlinedLinks";
 
 const FONT = '"JetBrains Mono", Menlo, monospace';
 const RESET = [0x1b, 0x63]; // ESC c: the daemon sends it before replaying a snapshot
@@ -59,11 +60,14 @@ export function TerminalView({
   sessionId,
   agent,
   live,
+  transcriptPath,
   autoFocus = true,
 }: {
   sessionId: string;
   agent: AgentId;
   live: boolean;
+  /** The agent's transcript, where links it printed without a target are looked up. */
+  transcriptPath: string | null;
   /** Whether the terminal takes the keyboard when it opens (the active pane's does). */
   autoFocus?: boolean;
 }) {
@@ -75,6 +79,8 @@ export function TerminalView({
   liveRef.current = live;
   const agentRef = useRef(agent);
   agentRef.current = agent;
+  const transcriptRef = useRef(transcriptPath);
+  transcriptRef.current = transcriptPath;
 
   useEffect(() => {
     const el = host.current;
@@ -106,6 +112,17 @@ export function TerminalView({
       term.loadAddon(fit);
       // Plain URLs in the output, including ones wrapped across lines.
       term.loadAddon(new WebLinksAddon(openTerminalLink));
+      // Codex's links to local files: underlined labels whose target is in its rollout.
+      if (agentRef.current === "codex") {
+        term.registerLinkProvider(
+          underlinedLinkProvider(term, (event, label) => {
+            const transcript = transcriptRef.current;
+            if (!transcript || !(IS_MAC ? event.metaKey : event.ctrlKey)) return;
+            event.preventDefault();
+            void api.openTranscriptLink(transcript, label).catch(() => {});
+          }),
+        );
+      }
       term.open(el);
       try {
         const webgl = new WebglAddon();
