@@ -22,11 +22,14 @@ const SCAN_LIMIT: usize = 3000;
 
 impl CodexAdapter {
     /// 0.167.0 has no `--full-auto`; `-a` takes only `on-request` and `never`.
+    /// Full auto drops the sandbox too, like Claude's `bypassPermissions`: `workspace-write`
+    /// keeps `.git` read-only and blocks the network, and with `-a never` Codex can't ask
+    /// to leave it, so commits, installs and pushes just fail.
     fn permission_args(p: PermissionPreset) -> [&'static str; 4] {
         match p {
             PermissionPreset::AskFirst => ["-s", "read-only", "-a", "on-request"],
             PermissionPreset::AutoEdit => ["-s", "workspace-write", "-a", "on-request"],
-            PermissionPreset::FullAuto => ["-s", "workspace-write", "-a", "never"],
+            PermissionPreset::FullAuto => ["-s", "danger-full-access", "-a", "never"],
         }
     }
 
@@ -741,7 +744,7 @@ mod tests {
         r.permission = PermissionPreset::FullAuto;
         assert_eq!(
             CodexAdapter.launch(&r).args,
-            ["-s", "workspace-write", "-a", "never"]
+            ["-s", "danger-full-access", "-a", "never"]
         );
         r.permission = PermissionPreset::AutoEdit;
         assert_eq!(

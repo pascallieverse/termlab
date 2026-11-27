@@ -159,7 +159,10 @@ Esc. The label is the description even while the row shows activity.
   - `-a` takes only `on-request` or `never`; the sandbox is
     `-s read-only|workspace-write|danger-full-access`.
   - Mapping: Ask first → `-s read-only -a on-request`; Auto-edit →
-    `-s workspace-write -a on-request`; Full auto → `-s workspace-write -a never`.
+    `-s workspace-write -a on-request`; Full auto → `-s danger-full-access -a never`.
+  - Full auto can't stay in `workspace-write`: that sandbox keeps `.git` read-only and blocks
+    the network, and with `-a never` Codex can't ask to leave it, so `git commit` fails with
+    `Operation not permitted`.
 - Resume: `codex resume [options] <SESSION_ID> [PROMPT]`. Fork: `codex fork <SESSION_ID>`.
 - Status: `-c 'notify=["<termlab-hook>", "codex", "notify"]'` overrides `notify` for that run
   only; `~/.codex/config.toml` is untouched.
